@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+
+# Data files
+*.csv
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model files (included - comment out to exclude)
+# models/*.pkl
+
+# Node
+dashboard/node_modules/
+dashboard/.env.local
+dashboard/.env.*.local
+dashboard/npm-debug.log
+dashboard/yarn-debug.log*
+dashboard/yarn-error.log*
