@@ -132,5 +132,12 @@ See [`docs/COMPLETE_DOCUMENTATION_FINAL.md`](docs/COMPLETE_DOCUMENTATION_FINAL.m
 
 ## Authors
 
-**Batch 13**  
-IoT Intrusion Detection System — Mini Project
+**Batch 13**
+
+| Roll No | Name |
+|---------|------|
+| 2451-23-749-040 | Chavada Shashank |
+| 2451-23-749-051 | P Samuel Vijay |
+| 2451-23-749-060 | Arikela Sriharsh |
+
+**IoT** — Year: 3 | Sem: 2 | **MVSREC**
