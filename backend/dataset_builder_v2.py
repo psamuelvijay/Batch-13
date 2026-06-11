@@ -2,275 +2,247 @@ import pandas as pd
 import numpy as np
 
 # ============================================================
-# ENHANCED DATASET BUILDER v2.1 - FIXED FOR YOUR CSV FORMAT
+# DATASET BUILDER v3.0 — LEAKAGE-FREE
+#
+# Key fixes vs v2:
+#   1. uid_flag and firmware_flag REMOVED — trivial identity predictors
+#   2. temp_out_of_range / humid_out_of_range REMOVED — thresholds
+#      were hand-tuned to the attack pattern (zero false positives
+#      by design = cheating)
+#   3. Rolling window features computed PER-DEVICE, not globally
+#   4. Dataset sorted by timestamp before windowing
+#   5. Time-based train/test split (not random) enforced here
+#      so the training script doesn't have to guess
+#
+# Features kept (pure behavioral signals):
+#   temperature, humidity, interval (raw)
+#   interval_deviation (abs distance from 5000ms — still useful,
+#     but only as a continuous signal, not a binary flag)
+#   interval_mean, interval_std  (per-device rolling)
+#   temp_mean, temp_std          (per-device rolling)
+#   humid_mean, humid_std        (per-device rolling)
 # ============================================================
 
-print("="*60)
-print("🚀 ENHANCED DATASET BUILDER v2.1")
-print("="*60)
+print("=" * 60)
+print("DATASET BUILDER v3.0 — LEAKAGE-FREE")
+print("=" * 60)
 
 # ---------------- CONFIGURATION ----------------
 
-LEGIT_UID = "D00061FE8CE0"
-LEGIT_FIRMWARE = "dfc2dcd4"
-
-WINDOW_SIZE = 10  # Look at last 10 packets for patterns
+WINDOW_SIZE = 10   # rolling window size per device
+TRAIN_RATIO = 0.75  # first 75% of time → train, last 25% → test
 
 # ---------------- STEP 1: LOAD RAW DATA ----------------
 
 print("\n[1/7] Loading raw data from InfluxDB export...")
 
-# Read CSV skipping first 3 rows (InfluxDB metadata)
+# InfluxDB CSV exports have 3 header rows before actual data
 df = pd.read_csv("data.csv", skiprows=3, on_bad_lines='skip')
 
-print(f"📊 Raw shape: {df.shape}")
-print(f"📋 Raw columns: {list(df.columns)}")
-print(f"\nFirst few rows:")
+print(f"Raw shape: {df.shape}")
+print(f"Raw columns: {list(df.columns)}")
 print(df.head())
 
 # ---------------- STEP 2: SELECT & CLEAN COLUMNS ----------------
 
-print("\n[2/7] Cleaning and selecting features...")
+print("\n[2/7] Cleaning columns...")
 
-# Keep only the columns we need
-# Adjust these column names based on what's actually in your CSV
-required_cols = ["uid", "humidity", "interval", "temperature", "verdict"]
+# Minimum required columns — source labels the device (legit/ghost)
+required_cols = ["source", "humidity", "interval", "temperature", "verdict"]
 
-# Check which columns exist
-available_cols = []
-for col in required_cols:
-    if col in df.columns:
-        available_cols.append(col)
-    else:
-        print(f"⚠️  Column '{col}' not found in CSV")
+# Check availability
+available_cols = [c for c in required_cols if c in df.columns]
+missing = set(required_cols) - set(available_cols)
+if missing:
+    print(f"WARNING: Missing columns: {missing}")
+    print(f"Available: {list(df.columns)}")
+    if len(available_cols) < 4:
+        raise ValueError("Too many missing columns — check InfluxDB export query.")
 
-if len(available_cols) < 4:
-    print("\n❌ ERROR: Missing critical columns!")
-    print(f"Required: {required_cols}")
-    print(f"Available in CSV: {list(df.columns)}")
-    print("\n💡 TIP: Check your InfluxDB export query includes all fields")
-    exit(1)
+# Keep timestamp if present (needed for time-based split)
+if "_time" in df.columns:
+    available_cols = ["_time"] + available_cols
+elif "timestamp" in df.columns:
+    available_cols = ["timestamp"] + available_cols
 
-df = df[available_cols]
+df = df[available_cols].copy()
+df = df.dropna().drop_duplicates()
 
-# Remove NaN and duplicates
-original_count = len(df)
+# Convert sensor columns to numeric
+for col in ["humidity", "interval", "temperature"]:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+
 df = df.dropna()
-df = df.drop_duplicates()
-cleaned_count = len(df)
+print(f"Clean rows after conversion: {len(df)}")
 
-print(f"✅ Removed {original_count - cleaned_count} invalid/duplicate rows")
-print(f"✅ Clean rows: {cleaned_count}")
+# ---------------- STEP 3: SORT BY TIME ----------------
 
-# Convert to numeric
-df["humidity"] = pd.to_numeric(df["humidity"], errors='coerce')
-df["interval"] = pd.to_numeric(df["interval"], errors='coerce')
-df["temperature"] = pd.to_numeric(df["temperature"], errors='coerce')
+print("\n[3/7] Sorting by time...")
 
-# Drop rows where conversion failed
-df = df.dropna()
+time_col = "_time" if "_time" in df.columns else ("timestamp" if "timestamp" in df.columns else None)
 
-print(f"✅ Final clean rows: {len(df)}")
-
-# ---------------- STEP 3: FEATURE ENGINEERING ----------------
-
-print("\n[3/7] Engineering features...")
-
-# Binary flags for identity features
-df["uid_flag"] = df["uid"].apply(lambda x: 0 if str(x) == LEGIT_UID else 1)
-
-# Check if firmware_hash column exists
-if "firmware_hash" in df.columns:
-    df["firmware_flag"] = df["firmware_hash"].apply(
-        lambda x: 0 if str(x) == LEGIT_FIRMWARE else 1
-    )
+if time_col:
+    df = df.sort_values(time_col).reset_index(drop=True)
+    print(f"Sorted by '{time_col}'")
 else:
-    # If no firmware column, infer from verdict
-    df["firmware_flag"] = df["verdict"].apply(
-        lambda x: 1 if "TAMPER" in str(x) else 0
-    )
+    print("WARNING: No timestamp column found — using row order as proxy.")
+    print("Ensure data.csv is exported in chronological order from InfluxDB.")
+    df = df.reset_index(drop=True)
 
-# Interval deviation (how far from normal 5000ms)
+# ---------------- STEP 4: FEATURE ENGINEERING ----------------
+
+print("\n[4/7] Engineering features (no identity flags, no threshold flags)...")
+
+# Raw behavioral signals only
 df["interval_deviation"] = np.abs(df["interval"] - 5000)
 
-# Temperature bounds check (normal range: 25-35°C)
-df["temp_out_of_range"] = ((df["temperature"] < 25) | (df["temperature"] > 35)).astype(int)
+# NOTE: We do NOT add uid_flag, firmware_flag, temp_out_of_range,
+# humid_out_of_range. Those features perfectly encode the attack
+# label and prevent the model from learning real behavioral patterns.
 
-# Humidity bounds check (normal range: 30-65%)
-df["humid_out_of_range"] = ((df["humidity"] < 30) | (df["humidity"] > 65)).astype(int)
+print("Added: interval_deviation")
 
-print(f"✅ Added 5 engineered features")
+# ---------------- STEP 5: PER-DEVICE ROLLING WINDOW FEATURES ----------------
 
-# ---------------- STEP 4: SLIDING WINDOW FEATURES ----------------
+print(f"\n[5/7] Computing per-device rolling window features (window={WINDOW_SIZE})...")
 
-print(f"\n[4/7] Computing sliding window features (window={WINDOW_SIZE})...")
+# CRITICAL FIX: group by source so ghost windows never contaminate legit windows
+df = df.sort_values([time_col if time_col else df.index.name or "index"]).reset_index(drop=True)
 
-# Sort by index (assuming chronological order from InfluxDB)
-df = df.reset_index(drop=True)
+groups = []
+for source_val, group in df.groupby("source", sort=False):
+    group = group.copy().reset_index(drop=True)
 
-# Rolling statistics for interval
-df["interval_mean"] = df["interval"].rolling(window=WINDOW_SIZE, min_periods=1).mean()
-df["interval_std"] = df["interval"].rolling(window=WINDOW_SIZE, min_periods=1).std()
-df["interval_min"] = df["interval"].rolling(window=WINDOW_SIZE, min_periods=1).min()
-df["interval_max"] = df["interval"].rolling(window=WINDOW_SIZE, min_periods=1).max()
+    # Rolling interval stats
+    group["interval_mean"] = group["interval"].rolling(WINDOW_SIZE, min_periods=2).mean()
+    group["interval_std"]  = group["interval"].rolling(WINDOW_SIZE, min_periods=2).std()
 
-# Rolling statistics for temperature
-df["temp_mean"] = df["temperature"].rolling(window=WINDOW_SIZE, min_periods=1).mean()
-df["temp_std"] = df["temperature"].rolling(window=WINDOW_SIZE, min_periods=1).std()
+    # Rolling temperature stats
+    group["temp_mean"]     = group["temperature"].rolling(WINDOW_SIZE, min_periods=2).mean()
+    group["temp_std"]      = group["temperature"].rolling(WINDOW_SIZE, min_periods=2).std()
 
-# Rolling statistics for humidity
-df["humid_mean"] = df["humidity"].rolling(window=WINDOW_SIZE, min_periods=1).mean()
-df["humid_std"] = df["humidity"].rolling(window=WINDOW_SIZE, min_periods=1).std()
+    # Rolling humidity stats
+    group["humid_mean"]    = group["humidity"].rolling(WINDOW_SIZE, min_periods=2).mean()
+    group["humid_std"]     = group["humidity"].rolling(WINDOW_SIZE, min_periods=2).std()
 
-# Fill NaN values (first few rows won't have full window)
-df = df.fillna(0)
+    groups.append(group)
 
-print(f"✅ Added 10 sliding window features")
+df = pd.concat(groups).sort_values(time_col if time_col else df.index.name or "index").reset_index(drop=True)
 
-# ---------------- STEP 5: CONVERT VERDICTS TO LABELS ----------------
+# Drop rows with NaN windows (first few rows per device have no history)
+df = df.dropna(subset=["interval_mean", "interval_std", "temp_mean",
+                        "temp_std", "humid_mean", "humid_std"])
 
-print("\n[5/7] Converting verdicts to multi-label targets...")
+print(f"Rows after dropping incomplete windows: {len(df)}")
+
+# ---------------- STEP 6: CONVERT VERDICTS TO LABELS ----------------
+
+print("\n[6/7] Converting verdicts to labels...")
 
 def parse_verdict(v):
-    """Convert verdict string to binary labels"""
     v = str(v).upper()
     return {
-        "is_clone": 1 if "CLONE" in v else 0,
-        "is_tamper": 1 if "TAMPER" in v else 0,
+        "is_clone":   1 if "CLONE"   in v else 0,
+        "is_tamper":  1 if "TAMPER"  in v else 0,
         "is_anomaly": 1 if "ANOMALY" in v else 0,
-        "is_trusted": 1 if v == "TRUSTED" else 0
+        "is_trusted": 1 if v == "TRUSTED" else 0,
     }
 
 labels = df["verdict"].apply(parse_verdict).apply(pd.Series)
 df = pd.concat([df, labels], axis=1)
 
-# Create binary attack flag (0=TRUSTED, 1=ANY ATTACK)
-df["attack_flag"] = ((df["is_clone"] == 1) | 
-                     (df["is_tamper"] == 1) | 
-                     (df["is_anomaly"] == 1)).astype(int)
+# Binary: 0 = TRUSTED, 1 = any attack
+df["attack_flag"] = (
+    (df["is_clone"] == 1) |
+    (df["is_tamper"] == 1) |
+    (df["is_anomaly"] == 1)
+).astype(int)
 
-# Create multi-class label (for classification)
+# Multi-class label
 def get_attack_class(row):
-    """Convert multi-label to single class"""
-    if row["is_trusted"]:
-        return 0  # TRUSTED
-    elif row["is_clone"] and row["is_tamper"] and row["is_anomaly"]:
-        return 1  # CLONE+TAMPER+ANOMALY
-    elif row["is_clone"] and row["is_anomaly"]:
-        return 1  # CLONE+ANOMALY (same bucket as combined)
-    elif row["is_clone"]:
-        return 2  # CLONE ONLY
-    elif row["is_tamper"]:
-        return 3  # TAMPER ONLY
-    elif row["is_anomaly"]:
-        return 4  # ANOMALY ONLY
-    else:
-        return 5  # OTHER
+    if row["is_trusted"]:      return 0  # TRUSTED
+    if row["is_clone"]  and row["is_tamper"] and row["is_anomaly"]: return 1
+    if row["is_clone"]  and row["is_anomaly"]:  return 1
+    if row["is_clone"]:        return 2  # CLONE ONLY
+    if row["is_tamper"]:       return 3  # TAMPER ONLY
+    if row["is_anomaly"]:      return 4  # ANOMALY ONLY
+    return 5
 
 df["attack_class"] = df.apply(get_attack_class, axis=1)
 
-print(f"✅ Multi-label targets created")
+print(f"Class distribution:\n{df['attack_flag'].value_counts().to_string()}")
 
-# ---------------- STEP 6: DROP UNNECESSARY COLUMNS ----------------
+# ---------------- STEP 7: TIME-BASED TRAIN/TEST SPLIT MARKER ----------------
 
-print("\n[6/7] Finalizing dataset...")
+print(f"\n[7/7] Marking time-based train/test split ({int(TRAIN_RATIO*100)}/{int((1-TRAIN_RATIO)*100)})...")
 
-# Drop original text columns
-drop_cols = ["verdict", "uid"]
-if "firmware_hash" in df.columns:
-    drop_cols.append("firmware_hash")
+split_idx = int(len(df) * TRAIN_RATIO)
+df["split"] = "test"
+df.iloc[:split_idx, df.columns.get_loc("split")] = "train"
 
-drop_cols = [col for col in drop_cols if col in df.columns]
-df = df.drop(columns=drop_cols)
+train_count = (df["split"] == "train").sum()
+test_count  = (df["split"] == "test").sum()
+print(f"Train rows: {train_count} | Test rows: {test_count}")
 
-# ---------------- STEP 7: SAVE CLEAN DATASET ----------------
+# Verify class balance in both splits
+for split in ["train", "test"]:
+    dist = df[df["split"] == split]["attack_flag"].value_counts()
+    print(f"  {split} — Normal: {dist.get(0, 0)}, Attack: {dist.get(1, 0)}")
 
-output_file = "clean_dataset_v2.csv"
+# ---------------- FINALIZE & SAVE ----------------
+
+# Drop original text/identity columns — NOT used as features
+drop_cols = ["verdict", "source"]
+if time_col and time_col in df.columns:
+    drop_cols.append(time_col)
+
+df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+
+output_file = "clean_dataset_v3.csv"
 df.to_csv(output_file, index=False)
 
-print(f"\n{'='*60}")
-print(f"✅ DATASET READY: '{output_file}'")
-print(f"{'='*60}")
+print(f"\n{'=' * 60}")
+print(f"DATASET READY: '{output_file}'")
+print(f"{'=' * 60}")
 
-# ---------------- STEP 8: SUMMARY STATISTICS ----------------
+# ---------------- SUMMARY ----------------
 
-print("\n📊 DATASET SUMMARY:")
-print(f"Total rows: {len(df)}")
-feature_cols = [col for col in df.columns if not col.startswith('is_') and col not in ['attack_flag', 'attack_class']]
-print(f"Total features: {len(feature_cols)}")
-print(f"\nFeature columns: {feature_cols}")
+feature_cols = [c for c in df.columns
+                if not c.startswith("is_") and c not in
+                ["attack_flag", "attack_class", "split"]]
 
-print(f"\n🎯 LABEL DISTRIBUTION:")
-print(f"Attack vs Trusted:")
-print(df["attack_flag"].value_counts())
+print(f"\nTotal rows:     {len(df)}")
+print(f"Feature count:  {len(feature_cols)}")
+print(f"Features:       {feature_cols}")
 
-balance_ratio = df["attack_flag"].value_counts()
-if len(balance_ratio) == 2:
-    ratio = balance_ratio[1] / balance_ratio[0]
-    print(f"\n📊 Class balance: 1:{ratio:.2f} (attack:normal)")
-    if ratio > 5:
-        print("⚠️  WARNING: Severe class imbalance! SMOTE will be used in training.")
-    elif ratio > 3:
-        print("⚠️  Moderate class imbalance. SMOTE recommended.")
-    else:
-        print("✅ Acceptable class balance.")
-
-print(f"\nMulti-label breakdown:")
+print(f"\nLabel breakdown:")
+print(f"  TRUSTED: {df['is_trusted'].sum()}")
 print(f"  CLONE:   {df['is_clone'].sum()}")
 print(f"  TAMPER:  {df['is_tamper'].sum()}")
 print(f"  ANOMALY: {df['is_anomaly'].sum()}")
-print(f"  TRUSTED: {df['is_trusted'].sum()}")
 
-print(f"\n🏷️  ATTACK CLASS DISTRIBUTION:")
-class_names = {
-    0: "TRUSTED",
-    1: "CLONE+ANOMALY",
-    2: "CLONE ONLY",
-    3: "TAMPER ONLY",
-    4: "ANOMALY ONLY",
-    5: "OTHER"
-}
-for class_id, count in df["attack_class"].value_counts().sort_index().items():
-    print(f"  {class_names.get(class_id, 'UNKNOWN')}: {count}")
+# ---------------- CORRELATION CHECK ----------------
 
-print(f"\n📈 FEATURE STATISTICS:")
-print(df[["interval", "temperature", "humidity", "interval_mean", "interval_std"]].describe())
+print(f"\n{'=' * 60}")
+print("FEATURE CORRELATION WITH attack_flag")
+print(f"{'=' * 60}")
 
-print(f"\n✅ First 5 rows:")
-print(df.head())
+label_cols_drop = ["is_clone", "is_tamper", "is_anomaly",
+                   "is_trusted", "attack_class", "split"]
+numeric_df = df.drop(columns=[c for c in label_cols_drop if c in df.columns])
+numeric_df = numeric_df.select_dtypes(include=[np.number])
+corr = numeric_df.corr()["attack_flag"].drop("attack_flag").sort_values(ascending=False)
 
-# ---------------- FEATURE CORRELATION CHECK ----------------
+print(corr.to_string())
 
-print(f"\n{'='*60}")
-print("📊 FEATURE CORRELATION ANALYSIS")
-print(f"{'='*60}")
-
-# Exclude label columns from correlation check (they are targets, not features)
-label_cols_check = ["is_clone", "is_tamper", "is_anomaly", "is_trusted", "attack_class"]
-feature_only_df = df.drop(columns=[c for c in label_cols_check if c in df.columns])
-numeric_df = feature_only_df.select_dtypes(include=[np.number])
-correlation = numeric_df.corr()['attack_flag'].sort_values(ascending=False)
-print("\nTop features correlated with attack_flag:")
-print(correlation.head(10))
-
-print("\n⚠️  OVERFITTING CHECK:")
-high_corr = correlation[correlation.abs() > 0.95]
-if len(high_corr) > 1:  # Exclude target itself
-    print("🚨 CRITICAL: Features with >0.95 correlation detected!")
-    print(high_corr)
-    print("\n💡 This suggests data leakage or trivial separation.")
-    print("   Model will likely show 100% accuracy (bad!).")
-elif correlation.abs().max() > 0.85:
-    print("⚠️  Some features have very high correlation (>0.85)")
-    print("   Model may rely too heavily on single features.")
-    print("\nHighest correlations:")
-    print(correlation[correlation.abs() > 0.85])
+print("\nOVERFITTING CHECK:")
+max_corr = corr.abs().max()
+if max_corr > 0.95:
+    print(f"CRITICAL: max correlation = {max_corr:.3f} — data leakage still present!")
+elif max_corr > 0.80:
+    print(f"WARNING:  max correlation = {max_corr:.3f} — review top features.")
 else:
-    print("✅ No perfect correlations detected!")
-    print("   Features show good diversity.")
-    print("   Expected model accuracy: 90-96%")
+    print(f"OK:       max correlation = {max_corr:.3f} — no single feature dominates.")
+    print("Expected model accuracy range: 85-95% (healthy)")
 
-print(f"\n{'='*60}")
-print("🎉 Dataset ready for ML training!")
-print(f"{'='*60}")
-print(f"\n📝 Next step: Run 'python train_models.py'")
+print(f"\nNext step: python train_models_v3_FIXED.py")

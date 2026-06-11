@@ -1,364 +1,393 @@
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.metrics import (
-    classification_report, confusion_matrix, 
-    roc_auc_score, precision_recall_curve, roc_curve,
-    accuracy_score, precision_score, recall_score, f1_score
+    accuracy_score, precision_score, recall_score,
+    f1_score, roc_auc_score, confusion_matrix, roc_curve
 )
+from sklearn.pipeline import Pipeline
 from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.model_selection import StratifiedKFold, cross_validate
 import joblib
 import warnings
 warnings.filterwarnings('ignore')
 
-# ============================================================
-# ML TRAINING PIPELINE v3.0 - FIXED DATA LEAKAGE
-# ============================================================
-
-print("="*70)
-print("🤖 IoT IDS - ML TRAINING PIPELINE v3.0 (LEAKAGE-FREE)")
-print("="*70)
-
-# ----------------CONFIGURATION ----------------
-
-RANDOM_STATE = 42
-TEST_SIZE = 0.25
-BALANCE_DATASET = True
-
-# 🔥 EXCLUDE HIGH-CORRELATION FEATURES TO PREVENT DATA LEAKAGE
-EXCLUDE_FEATURES = [
-    'interval_std',    # 89% correlation - TOO HIGH!
-    'interval_min',    # 91% correlation - TOO HIGH!
-    'interval_max',    # High correlation
-    'humid_std',       # 76% correlation
-    'temp_std'         # 64% correlation
-]
-
-print(f"\n🔧 ANTI-LEAKAGE MODE:")
-print(f"   Excluding {len(EXCLUDE_FEATURES)} high-correlation features")
-print(f"   This will reduce accuracy but improve model robustness!")
-
-# ---------------- STEP 1: LOAD DATASET ----------------
-
-print("\n[1/6] Loading clean dataset...")
-df = pd.read_csv("clean_dataset_v2.csv")
-
-print(f"📊 Dataset shape: {df.shape}")
-print(f"✅ Loaded {len(df)} samples")
-
-# ---------------- STEP 2: PREPARE FEATURES & TARGETS ----------------
-
-print("\n[2/6] Preparing features and targets...")
-
-# Define label columns
-label_cols = ["is_clone", "is_tamper", "is_anomaly", "is_trusted", "attack_flag", "attack_class"]
-
-# Get all feature columns
-all_feature_cols = [col for col in df.columns if col not in label_cols]
-
-# 🔥 REMOVE LEAKY FEATURES
-feature_cols = [f for f in all_feature_cols if f not in EXCLUDE_FEATURES]
-
-print(f"\n📉 Removed features:")
-for feat in EXCLUDE_FEATURES:
-    if feat in all_feature_cols:
-        print(f"   ❌ {feat}")
-
-print(f"\n📈 Remaining features ({len(feature_cols)}):")
-for feat in feature_cols:
-    print(f"   ✅ {feat}")
-
-X = df[feature_cols].values
-y_binary = df["attack_flag"].values
-y_multiclass = df["attack_class"].values
-
-print(f"\n🎯 Target distribution (binary):")
-print(f"   Normal (0): {(y_binary == 0).sum()}")
-print(f"   Attack (1): {(y_binary == 1).sum()}")
-ratio = (y_binary == 1).sum() / (y_binary == 0).sum()
-print(f"   Imbalance ratio: 1:{ratio:.1f}")
-
-# ---------------- STEP 3: TRAIN-TEST SPLIT ----------------
-
-print(f"\n[3/6] Splitting data ({int((1-TEST_SIZE)*100)}% train, {int(TEST_SIZE*100)}% test)...")
-
-X_train, X_test, y_train_bin, y_test_bin, y_train_multi, y_test_multi = train_test_split(
-    X, y_binary, y_multiclass,
-    test_size=TEST_SIZE,
-    random_state=RANDOM_STATE,
-    stratify=y_binary
-)
-
-print(f"✅ Train: {len(X_train)} samples")
-print(f"✅ Test:  {len(X_test)} samples")
-
-# ---------------- STEP 4: FEATURE SCALING ----------------
-
-print("\n[4/6] Scaling features...")
-
 import os
 os.makedirs("models", exist_ok=True)
 
+# ============================================================
+# ML TRAINING PIPELINE v4.0 — PROPERLY LEAKAGE-FREE
+#
+# Fixes vs v3:
+#   1. Uses clean_dataset_v3.csv (no uid_flag, firmware_flag,
+#      temp_out_of_range, humid_out_of_range)
+#   2. TIME-BASED split — train on first 75%, test on last 25%
+#      (no random shuffling across time)
+#   3. SMOTE applied INSIDE cross-validation folds only,
+#      not on the full training set
+#   4. No excluded features needed — leaky features are gone
+#      from the dataset itself
+#   5. evaluate_results.py now loads v4 models
+# ============================================================
+
+RANDOM_STATE = 42
+
+print("=" * 70)
+print("IoT IDS — ML TRAINING PIPELINE v4.0 (PROPERLY LEAKAGE-FREE)")
+print("=" * 70)
+
+# ============================================================
+# STEP 1: LOAD DATASET
+# ============================================================
+
+print("\n[1/6] Loading clean dataset...")
+
+try:
+    df = pd.read_csv("clean_dataset_v3.csv")
+except FileNotFoundError:
+    raise FileNotFoundError(
+        "clean_dataset_v3.csv not found.\n"
+        "Run dataset_builder_v2.py first to generate it."
+    )
+
+print(f"Shape: {df.shape}")
+print(f"Columns: {list(df.columns)}")
+
+# ============================================================
+# STEP 2: FEATURE / LABEL SPLIT
+# ============================================================
+
+print("\n[2/6] Separating features and labels...")
+
+label_cols    = ["is_clone", "is_tamper", "is_anomaly", "is_trusted",
+                 "attack_flag", "attack_class", "split"]
+feature_cols  = [c for c in df.columns if c not in label_cols]
+
+print(f"Features ({len(feature_cols)}): {feature_cols}")
+
+# Sanity check — none of the known leaky features should be present
+FORBIDDEN = ["uid_flag", "firmware_flag", "temp_out_of_range",
+             "humid_out_of_range", "source", "verdict", "_time", "timestamp"]
+leaky = [f for f in feature_cols if f in FORBIDDEN]
+if leaky:
+    raise ValueError(
+        f"Leaky features still in dataset: {leaky}\n"
+        "Re-run dataset_builder_v2.py."
+    )
+
+X          = df[feature_cols].values
+y_binary   = df["attack_flag"].values
+y_multi    = df["attack_class"].values
+split_mask = df["split"].values  # "train" or "test"
+
+# ============================================================
+# STEP 3: TIME-BASED TRAIN/TEST SPLIT
+# ============================================================
+
+print("\n[3/6] Applying time-based train/test split...")
+
+train_mask = split_mask == "train"
+test_mask  = split_mask == "test"
+
+X_train, X_test         = X[train_mask],       X[test_mask]
+y_train_bin, y_test_bin = y_binary[train_mask], y_binary[test_mask]
+y_train_mul, y_test_mul = y_multi[train_mask],  y_multi[test_mask]
+
+print(f"Train: {len(X_train)} rows | Test: {len(X_test)} rows")
+print(f"Train attack rate: {y_train_bin.mean():.2%}")
+print(f"Test  attack rate: {y_test_bin.mean():.2%}")
+
+# ============================================================
+# STEP 4: SCALE
+# ============================================================
+
+print("\n[4/6] Scaling features...")
+
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+X_test_scaled  = scaler.transform(X_test)
 
-joblib.dump(scaler, "models/scaler_v3.pkl")
-print("✅ Scaler saved to 'models/scaler_v3.pkl'")
+joblib.dump(scaler, "models/scaler_v4.pkl")
+print("Saved: models/scaler_v4.pkl")
 
-# ---------------- STEP 5: HANDLE CLASS IMBALANCE ----------------
+# ============================================================
+# STEP 5: CROSS-VALIDATION (SMOTE INSIDE FOLDS)
+# ============================================================
+#
+# We use imblearn Pipeline so SMOTE is fit only on training folds,
+# never on validation folds. This gives honest CV scores.
 
-if BALANCE_DATASET:
-    print("\n[5/6] Balancing dataset with SMOTE...")
-    
-    smote = SMOTE(random_state=RANDOM_STATE)
-    X_train_balanced, y_train_bin_balanced = smote.fit_resample(X_train_scaled, y_train_bin)
-    
-    print(f"Before SMOTE: {len(X_train_scaled)} samples")
-    print(f"After SMOTE:  {len(X_train_balanced)} samples")
-    
-    X_train_final = X_train_balanced
-    y_train_bin_final = y_train_bin_balanced
-else:
-    X_train_final = X_train_scaled
-    y_train_bin_final = y_train_bin
+print("\n[5/6] Cross-validating XGBoost with SMOTE inside folds...")
 
-# ---------------- STEP 6: TRAIN MODELS ----------------
-
-print("\n[6/6] Training models with regularization...")
-print("="*70)
-
-# ========================================
-# MODEL 1: Isolation Forest
-# ========================================
-
-print("\n🌲 [Model 1/3] Isolation Forest")
-print("-" * 70)
-
-iso_forest = IsolationForest(
-    n_estimators=100,
-    contamination=0.2,
-    random_state=RANDOM_STATE,
-    n_jobs=-1
-)
-
-X_normal = X_train_scaled[y_train_bin == 0]
-print(f"Training on {len(X_normal)} normal samples...")
-iso_forest.fit(X_normal)
-
-y_pred_iso = iso_forest.predict(X_test_scaled)
-y_pred_iso = np.where(y_pred_iso == -1, 1, 0)
-
-iso_acc = accuracy_score(y_test_bin, y_pred_iso)
-iso_prec = precision_score(y_test_bin, y_pred_iso, zero_division=0)
-iso_rec = recall_score(y_test_bin, y_pred_iso)
-iso_f1 = f1_score(y_test_bin, y_pred_iso)
-
-print(f"\n📊 Results:")
-print(f"   Accuracy:  {iso_acc:.3f}")
-print(f"   Precision: {iso_prec:.3f}")
-print(f"   Recall:    {iso_rec:.3f}")
-print(f"   F1-Score:  {iso_f1:.3f}")
-
-joblib.dump(iso_forest, "models/isolation_forest_v3.pkl")
-print("✅ Saved: 'models/isolation_forest_v3.pkl'")
-
-# ========================================
-# MODEL 2: XGBoost with HEAVY Regularization
-# ========================================
-
-print("\n\n🚀 [Model 2/3] XGBoost (Regularized)")
-print("-" * 70)
-
-xgb_binary = XGBClassifier(
-    n_estimators=100,
-    max_depth=3,              # Reduced from 6
-    learning_rate=0.05,       # Slower learning
-    min_child_weight=5,       # Need more samples per leaf
-    subsample=0.7,            # Use 70% of data per tree
-    colsample_bytree=0.7,     # Use 70% of features per tree
-    reg_alpha=0.5,            # L1 regularization
-    reg_lambda=2.0,           # L2 regularization
+xgb_base = XGBClassifier(
+    n_estimators=200,
+    max_depth=4,
+    learning_rate=0.05,
+    min_child_weight=5,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=1.0,
+    reg_lambda=2.0,
     random_state=RANDOM_STATE,
     eval_metric='logloss',
-    use_label_encoder=False
+    use_label_encoder=False,
 )
 
-print(f"Training on {len(X_train_final)} samples...")
-xgb_binary.fit(X_train_final, y_train_bin_final)
+cv_pipeline = ImbPipeline([
+    ("smote",  SMOTE(random_state=RANDOM_STATE)),
+    ("scaler", StandardScaler()),
+    ("model",  xgb_base),
+])
 
-# Cross-validation
-print(f"\n🔍 Running 5-Fold Cross-Validation...")
-cv_scores = cross_val_score(
-    xgb_binary, X_train_final, y_train_bin_final,
-    cv=5, scoring='accuracy'
+skf = StratifiedKFold(n_splits=5, shuffle=False)  # no shuffle — respects time order
+
+cv_results = cross_validate(
+    cv_pipeline, X_train, y_train_bin,
+    cv=skf,
+    scoring=["accuracy", "f1", "roc_auc"],
+    return_train_score=True,
 )
-print(f"CV Accuracy: {cv_scores.mean():.3f} (+/- {cv_scores.std():.3f})")
 
-if cv_scores.std() > 0.05:
-    print("⚠️  WARNING: High variance - possible overfitting!")
+print(f"\nCV Results (5-fold, time-ordered):")
+print(f"  Train Accuracy: {cv_results['train_accuracy'].mean():.3f} "
+      f"(+/- {cv_results['train_accuracy'].std():.3f})")
+print(f"  Val   Accuracy: {cv_results['test_accuracy'].mean():.3f} "
+      f"(+/- {cv_results['test_accuracy'].std():.3f})")
+print(f"  Val   F1:       {cv_results['test_f1'].mean():.3f} "
+      f"(+/- {cv_results['test_f1'].std():.3f})")
+print(f"  Val   ROC-AUC:  {cv_results['test_roc_auc'].mean():.3f} "
+      f"(+/- {cv_results['test_roc_auc'].std():.3f})")
+
+gap = cv_results['train_accuracy'].mean() - cv_results['test_accuracy'].mean()
+if gap > 0.10:
+    print(f"\nWARNING: Train-Val gap = {gap:.3f} — possible overfitting.")
+elif cv_results['test_accuracy'].mean() > 0.99:
+    print(f"\nWARNING: Val accuracy still >=99% — check dataset for remaining leakage.")
 else:
-    print("✅ Low variance - model is stable")
+    print(f"\nTrain-Val gap = {gap:.3f} — model looks healthy.")
 
-# Predict
-y_pred_xgb_bin = xgb_binary.predict(X_test_scaled)
-y_pred_proba_xgb = xgb_binary.predict_proba(X_test_scaled)[:, 1]
+# ============================================================
+# STEP 6: FINAL MODEL TRAINING
+# ============================================================
 
-xgb_acc = accuracy_score(y_test_bin, y_pred_xgb_bin)
-xgb_prec = precision_score(y_test_bin, y_pred_xgb_bin)
-xgb_rec = recall_score(y_test_bin, y_pred_xgb_bin)
-xgb_f1 = f1_score(y_test_bin, y_pred_xgb_bin)
-xgb_auc = roc_auc_score(y_test_bin, y_pred_proba_xgb)
+print("\n[6/6] Training final models on full training set...")
+print("=" * 70)
 
-print(f"\n📊 Results:")
-print(f"   Accuracy:  {xgb_acc:.3f}")
-print(f"   Precision: {xgb_prec:.3f}")
-print(f"   Recall:    {xgb_rec:.3f}")
-print(f"   F1-Score:  {xgb_f1:.3f}")
-print(f"   ROC-AUC:   {xgb_auc:.3f}")
+# --- SMOTE on training set (for final model only, CV is done) ---
+smote = SMOTE(random_state=RANDOM_STATE)
+X_train_bal, y_train_bal = smote.fit_resample(X_train_scaled, y_train_bin)
+print(f"After SMOTE: {len(X_train_bal)} train rows "
+      f"(was {len(X_train_scaled)})")
 
-# 🚨 SANITY CHECK
-if xgb_acc >= 0.99:
-    print("\n🚨 WARNING: Accuracy ≥99% detected!")
-    print("   This may still indicate data leakage.")
-    print("   Review feature correlations again.")
-elif xgb_acc >= 0.90:
-    print("\n✅ EXCELLENT: Accuracy in realistic range (90-99%)")
-    print("   Model is likely learning real patterns!")
-else:
-    print("\n✅ GOOD: Accuracy <90% indicates challenging dataset")
-    print("   Model is forced to learn complex patterns!")
+# =============================
+# MODEL 1: XGBoost (binary)
+# =============================
 
-joblib.dump(xgb_binary, "models/xgboost_binary_v3.pkl")
-print("✅ Saved: 'models/xgboost_binary_v3.pkl'")
-
-# ========================================
-# MODEL 3: Random Forest
-# ========================================
-
-print("\n\n🌳 [Model 3/3] Random Forest")
+print("\n[Model 1/3] XGBoost Binary Classifier")
 print("-" * 70)
 
-rf_multiclass = RandomForestClassifier(
-    n_estimators=100,
-    max_depth=8,              # Limited depth
-    min_samples_split=10,     # Need more samples to split
-    min_samples_leaf=5,       # Need more samples per leaf
+xgb_model = XGBClassifier(
+    n_estimators=200,
+    max_depth=4,
+    learning_rate=0.05,
+    min_child_weight=5,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=1.0,
+    reg_lambda=2.0,
     random_state=RANDOM_STATE,
-    n_jobs=-1
+    eval_metric='logloss',
+    use_label_encoder=False,
 )
+xgb_model.fit(X_train_bal, y_train_bal)
 
-print(f"Training on {len(X_train_scaled)} samples...")
-rf_multiclass.fit(X_train_scaled, y_train_multi)
+y_pred_xgb   = xgb_model.predict(X_test_scaled)
+y_proba_xgb  = xgb_model.predict_proba(X_test_scaled)[:, 1]
 
-y_pred_rf_multi = rf_multiclass.predict(X_test_scaled)
-rf_acc = accuracy_score(y_test_multi, y_pred_rf_multi)
+xgb_acc  = accuracy_score(y_test_bin, y_pred_xgb)
+xgb_prec = precision_score(y_test_bin, y_pred_xgb, zero_division=0)
+xgb_rec  = recall_score(y_test_bin, y_pred_xgb)
+xgb_f1   = f1_score(y_test_bin, y_pred_xgb)
+xgb_auc  = roc_auc_score(y_test_bin, y_proba_xgb)
 
-print(f"\n📊 Results:")
-print(f"   Accuracy: {rf_acc:.3f}")
+print(f"  Accuracy:  {xgb_acc:.4f}")
+print(f"  Precision: {xgb_prec:.4f}")
+print(f"  Recall:    {xgb_rec:.4f}")
+print(f"  F1-Score:  {xgb_f1:.4f}")
+print(f"  ROC-AUC:   {xgb_auc:.4f}")
 
-joblib.dump(rf_multiclass, "models/random_forest_multiclass_v3.pkl")
-print("✅ Saved: 'models/random_forest_multiclass_v3.pkl'")
+if xgb_acc >= 0.99:
+    print("\n  WARNING: Accuracy >=99%. Possible remaining data leakage!")
+    print("  Check the feature correlation report from dataset_builder_v2.py.")
+elif xgb_acc >= 0.88:
+    print("\n  GOOD: Accuracy in healthy range (88-99%). Model is learning real patterns.")
+else:
+    print("\n  NOTE: Accuracy <88%. Model is challenged — verify data quality.")
 
-# ========================================
+joblib.dump(xgb_model, "models/xgboost_binary_v4.pkl")
+print("  Saved: models/xgboost_binary_v4.pkl")
+
+# =============================
+# MODEL 2: Random Forest (multiclass)
+# =============================
+
+print("\n[Model 2/3] Random Forest Multiclass Classifier")
+print("-" * 70)
+
+rf_model = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=10,
+    min_samples_split=10,
+    min_samples_leaf=5,
+    random_state=RANDOM_STATE,
+    n_jobs=-1,
+    class_weight="balanced",  # handles imbalance without SMOTE
+)
+rf_model.fit(X_train_scaled, y_train_mul)
+
+y_pred_rf = rf_model.predict(X_test_scaled)
+rf_acc    = accuracy_score(y_test_mul, y_pred_rf)
+print(f"  Multiclass Accuracy: {rf_acc:.4f}")
+
+joblib.dump(rf_model, "models/random_forest_multiclass_v4.pkl")
+print("  Saved: models/random_forest_multiclass_v4.pkl")
+
+# =============================
+# MODEL 3: Isolation Forest (unsupervised anomaly)
+# =============================
+
+print("\n[Model 3/3] Isolation Forest (unsupervised)")
+print("-" * 70)
+
+# Train ONLY on normal traffic — the whole point of anomaly detection
+X_normal = X_train_scaled[y_train_bin == 0]
+print(f"  Training on {len(X_normal)} normal-only samples...")
+
+iso_model = IsolationForest(
+    n_estimators=200,
+    contamination=0.05,  # expect ~5% anomalies (conservative)
+    random_state=RANDOM_STATE,
+    n_jobs=-1,
+)
+iso_model.fit(X_normal)
+
+y_pred_iso = iso_model.predict(X_test_scaled)
+y_pred_iso = np.where(y_pred_iso == -1, 1, 0)
+
+iso_acc  = accuracy_score(y_test_bin, y_pred_iso)
+iso_prec = precision_score(y_test_bin, y_pred_iso, zero_division=0)
+iso_rec  = recall_score(y_test_bin, y_pred_iso)
+iso_f1   = f1_score(y_test_bin, y_pred_iso)
+
+print(f"  Accuracy:  {iso_acc:.4f}")
+print(f"  Precision: {iso_prec:.4f}")
+print(f"  Recall:    {iso_rec:.4f}")
+print(f"  F1-Score:  {iso_f1:.4f}")
+
+joblib.dump(iso_model, "models/isolation_forest_v4.pkl")
+print("  Saved: models/isolation_forest_v4.pkl")
+
+# ============================================================
 # SAVE METADATA
-# ========================================
-
-print("\n💾 Saving metadata...")
+# ============================================================
 
 metadata = {
-    "feature_names": feature_cols,
-    "excluded_features": EXCLUDE_FEATURES,
-    "feature_count": len(feature_cols),
-    "train_samples": len(X_train),
-    "test_samples": len(X_test),
-    "random_state": RANDOM_STATE,
-    "version": "3.0_leakage_free"
+    "feature_names":   feature_cols,
+    "feature_count":   len(feature_cols),
+    "train_samples":   len(X_train),
+    "test_samples":    len(X_test),
+    "random_state":    RANDOM_STATE,
+    "version":         "4.0_leakage_free",
+    "split_strategy":  "time_based",
+    "smote_strategy":  "inside_cv_and_final_train_only",
+    "removed_features": ["uid_flag", "firmware_flag",
+                         "temp_out_of_range", "humid_out_of_range"],
+    "notes": (
+        "Ghost ESP32 now uses legit UID for clone attacks. "
+        "Detection relies purely on behavioral signals. "
+        "Rolling windows computed per-device."
+    )
 }
 
-joblib.dump(metadata, "models/metadata_v3.pkl")
-print("✅ Saved: 'models/metadata_v3.pkl'")
+joblib.dump(metadata, "models/metadata_v4.pkl")
+print("\nSaved: models/metadata_v4.pkl")
 
-# ========================================
+# ============================================================
 # VISUALIZATIONS
-# ========================================
+# ============================================================
 
-print("\n📊 Generating visualizations...")
+print("\nGenerating visualizations...")
 
 # Confusion Matrix
+cm = confusion_matrix(y_test_bin, y_pred_xgb)
 plt.figure(figsize=(8, 6))
-cm = confusion_matrix(y_test_bin, y_pred_xgb_bin)
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
             xticklabels=['Normal', 'Attack'],
             yticklabels=['Normal', 'Attack'])
-plt.title('XGBoost - Confusion Matrix (Leakage-Free)')
+plt.title(f'XGBoost Confusion Matrix — v4 (Acc={xgb_acc:.3f})')
 plt.ylabel('True Label')
 plt.xlabel('Predicted Label')
 plt.tight_layout()
-plt.savefig('confusion_matrix_v3.png', dpi=150)
-print("✅ Saved 'confusion_matrix_v3.png'")
+plt.savefig('confusion_matrix_v4.png', dpi=150)
+plt.close()
+print("Saved: confusion_matrix_v4.png")
 
 # ROC Curve
+fpr_vals, tpr_vals, _ = roc_curve(y_test_bin, y_proba_xgb)
 plt.figure(figsize=(8, 6))
-fpr, tpr, _ = roc_curve(y_test_bin, y_pred_proba_xgb)
-plt.plot(fpr, tpr, label=f'XGBoost (AUC = {xgb_auc:.3f})', linewidth=2)
+plt.plot(fpr_vals, tpr_vals,
+         label=f'XGBoost (AUC={xgb_auc:.3f})', linewidth=2)
 plt.plot([0, 1], [0, 1], 'k--', label='Random Guess')
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive Rate')
-plt.title('ROC Curve - Leakage-Free Model')
+plt.title('ROC Curve — v4 Leakage-Free Model')
 plt.legend()
 plt.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig('roc_curve_v3.png', dpi=150)
-print("✅ Saved 'roc_curve_v3.png'")
+plt.savefig('roc_curve_v4.png', dpi=150)
+plt.close()
+print("Saved: roc_curve_v4.png")
 
 # Feature Importance
-plt.figure(figsize=(10, 8))
-feature_importance = pd.DataFrame({
-    'feature': feature_cols,
-    'importance': xgb_binary.feature_importances_
-}).sort_values('importance', ascending=False).head(15)
+fi = pd.DataFrame({
+    'feature':    feature_cols,
+    'importance': xgb_model.feature_importances_,
+}).sort_values('importance', ascending=False)
 
-plt.barh(range(len(feature_importance)), feature_importance['importance'])
-plt.yticks(range(len(feature_importance)), feature_importance['feature'])
+plt.figure(figsize=(10, 6))
+plt.barh(fi['feature'][::-1], fi['importance'][::-1])
 plt.xlabel('Importance Score')
-plt.title('Top Features (Leakage-Free Model)')
+plt.title('XGBoost Feature Importance — v4')
 plt.tight_layout()
-plt.savefig('feature_importance_v3.png', dpi=150)
-print("✅ Saved 'feature_importance_v3.png'")
+plt.savefig('feature_importance_v4.png', dpi=150)
+plt.close()
+print("Saved: feature_importance_v4.png")
 
-# ========================================
+# ============================================================
 # FINAL SUMMARY
-# ========================================
+# ============================================================
 
-print("\n" + "="*70)
-print("🎉 TRAINING COMPLETE!")
-print("="*70)
+print("\n" + "=" * 70)
+print("TRAINING COMPLETE — v4 Summary")
+print("=" * 70)
 
-print("\n🏆 MODEL COMPARISON:")
+print(f"\n{'Model':<35} {'Accuracy':>10} {'Precision':>10} {'Recall':>10} {'F1':>10}")
 print("-" * 70)
-print(f"{'Model':<30} {'Accuracy':<12} {'Precision':<12} {'Recall':<12} {'F1':<12}")
-print("-" * 70)
-print(f"{'Isolation Forest':<30} {iso_acc:<12.3f} {iso_prec:<12.3f} {iso_rec:<12.3f} {iso_f1:<12.3f}")
-print(f"{'XGBoost (Regularized)':<30} {xgb_acc:<12.3f} {xgb_prec:<12.3f} {xgb_rec:<12.3f} {xgb_f1:<12.3f}")
-print(f"{'Random Forest':<30} {rf_acc:<12.3f} {'-':<12} {'-':<12} {'-':<12}")
+print(f"{'XGBoost (binary)':<35} {xgb_acc:>10.3f} {xgb_prec:>10.3f} {xgb_rec:>10.3f} {xgb_f1:>10.3f}")
+print(f"{'Random Forest (multiclass)':<35} {rf_acc:>10.3f} {'-':>10} {'-':>10} {'-':>10}")
+print(f"{'Isolation Forest (unsupervised)':<35} {iso_acc:>10.3f} {iso_prec:>10.3f} {iso_rec:>10.3f} {iso_f1:>10.3f}")
 print("-" * 70)
 
-print("\n📝 EXPECTED RESULTS:")
-if xgb_acc >= 0.99:
-    print("   🚨 Still showing signs of data leakage!")
-    print("   → Consider re-collecting data with tighter intervals")
-elif xgb_acc >= 0.90:
-    print("   ✅ EXCELLENT! Realistic accuracy for production")
-    print("   → Model is learning real behavioral patterns!")
-else:
-    print("   ✅ GOOD! Model is challenged but performing well")
-    print("   → True machine learning, not memorization!")
+print(f"\nCV Val Accuracy: {cv_results['test_accuracy'].mean():.3f} "
+      f"(+/- {cv_results['test_accuracy'].std():.3f})")
+print(f"CV Val ROC-AUC:  {cv_results['test_roc_auc'].mean():.3f}")
 
-print("\n✅ Next: Run 'python evaluate_results.py' with v3 models!")
-print("="*70)
+print("\nNext: Run evaluate_results.py to generate SHAP plots and full report.")
+print("=" * 70)
