@@ -1,0 +1,330 @@
+# IoT Security System — Source Document (Technical Continuation Guide)
+
+---
+
+## 1. 📌 Project Overview
+
+This project implements a **behavior-based IoT security system** to detect cloned or compromised devices using telemetry and machine learning.
+
+### Core Idea:
+
+Traditional IoT security relies on identity (UID, firmware), which can be **copied by attackers**.
+This system instead uses **behavioral fingerprinting** (sensor patterns + timing) to detect anomalies.
+
+---
+
+## 2. 🎯 Problem Statement
+
+IoT devices are vulnerable to:
+
+* Device cloning (same UID)
+* Firmware tampering
+* Fake telemetry injection
+* Behavioral manipulation
+
+Attackers can **replicate identity**, making traditional detection ineffective.
+
+---
+
+## 3. ✅ Solution Approach
+
+Detect attacks using:
+
+* Sensor behavior (temperature, humidity)
+* Timing behavior (packet interval)
+* Pattern deviation from normal device behavior
+
+👉 Even if identity is cloned, **behavior cannot be perfectly replicated**
+
+---
+
+## 4. 🧱 System Architecture
+
+### Data Flow:
+
+ESP32 (Legit + Ghost)
+→ MQTT (Mosquitto Broker)
+→ FastAPI Backend
+→ InfluxDB (Time-Series Storage)
+→ Dashboard (Visualization)
+→ ML Model (Detection Layer)
+
+---
+
+## 5. 🔌 Hardware Layer
+
+### Devices:
+
+* **Legit ESP32**
+
+  * Real DHT11 sensor data
+  * Stable behavior (~30°C, ~40%, ~5000ms interval)
+
+* **Ghost ESP32 (Attacker Simulator)**
+
+  * Simulates:
+
+    * Clone attacks
+    * Firmware tampering
+    * Behavioral anomalies
+    * Combined attacks
+
+---
+
+## 6. 📡 Communication Layer
+
+* Protocol: **MQTT**
+* Broker: **Mosquitto (local)**
+* Topic: `iot/telemetry`
+
+---
+
+## 7. ⚙️ Backend (FastAPI)
+
+### Responsibilities:
+
+* Subscribe to MQTT topic
+* Process incoming telemetry
+* Apply rule-based detection
+* Store data in InfluxDB
+
+---
+
+### Detection Logic (Final Version)
+
+Multi-label detection:
+
+* CLONE → UID mismatch
+* TAMPER → Firmware mismatch
+* ANOMALY →
+
+  * Temperature > 40 or < 15
+  * Humidity < 25 or > 80
+  * Interval < 3000
+
+---
+
+### Output Format:
+
+```json
+{
+  "device_id": "ESP32_LEGIT",
+  "device_uid": "...",
+  "firmware_hash": "...",
+  "temperature": 30.6,
+  "humidity": 40.0,
+  "interval": 5036,
+  "verdict": "CLONE|TAMPER|ANOMALY",
+  "source": "ghost"
+}
+```
+
+---
+
+## 8. 🗄️ Database (InfluxDB)
+
+### Measurement:
+
+`iot_telemetry`
+
+### Tags:
+
+* device_id
+* uid
+* verdict
+* source
+
+### Fields:
+
+* temperature
+* humidity
+* interval
+* attack_flag (0/1)
+
+---
+
+## 9. 📊 Dashboard Panels
+
+### Implemented Panels:
+
+1. **Temperature**
+2. **Humidity**
+3. **Packet Interval**
+4. **Security Alerts**
+5. **Attack Count**
+6. **Combined Anomaly**
+
+---
+
+### Key Insight:
+
+* Legit → stable patterns
+* Ghost → irregular / noisy patterns
+
+---
+
+## 10. 📁 Dataset Generation
+
+### Source:
+
+InfluxDB export → CSV
+
+### Preprocessing:
+
+* Remove metadata rows
+* Assign correct column names manually
+* Drop duplicates
+* Handle corrupted rows (`on_bad_lines='skip'`)
+
+---
+
+### Final Dataset Format:
+
+| Feature     | Description           |
+| ----------- | --------------------- |
+| temperature | Sensor reading        |
+| humidity    | Sensor reading        |
+| interval    | Packet timing         |
+| source      | legit / ghost         |
+| attack_flag | 0 (legit), 1 (attack) |
+
+---
+
+### Dataset Size:
+
+~2000+ rows (sufficient for ML baseline)
+
+---
+
+## 11. ⚠️ Key Corrections Made
+
+* ❌ Removed UID-based learning (prevents cheating)
+* ❌ Avoided identity-based detection
+* ✅ Focused purely on behavioral features
+* ✅ Balanced dataset (downsampling attack class)
+
+---
+
+## 12. 🧠 Feature Engineering
+
+Added:
+
+* `temp_deviation = |temperature - 30|`
+* `interval_deviation = |interval - 5000|`
+
+👉 Converts raw data → meaningful behavioral signals
+
+---
+
+## 13. 🤖 Machine Learning Strategy
+
+### Models:
+
+1. **Isolation Forest**
+
+   * Unsupervised anomaly detection
+
+2. **Random Forest**
+
+   * Robust classification
+
+3. **XGBoost**
+
+   * High-performance boosting model
+
+---
+
+### Data Handling:
+
+* **SMOTE** → balance classes
+* Train/test split
+
+---
+
+### Explainability:
+
+* **SHAP**
+
+  * Identifies most important features
+  * Explains model decisions
+
+---
+
+## 14. 🔍 Key Behavioral Insights
+
+| Feature     | Legit    | Attack         |
+| ----------- | -------- | -------------- |
+| Temperature | Stable   | Wide variation |
+| Humidity    | Stable   | Extreme values |
+| Interval    | ~5000 ms | 2000–4000 ms   |
+
+👉 **Interval is the strongest signal**
+
+---
+
+## 15. 🚀 Current Status
+
+### Completed:
+
+* ESP32 simulation (legit + attacker)
+* MQTT pipeline
+* FastAPI ingestion
+* InfluxDB storage
+* Dashboard visualization
+* Dataset generation
+* Initial ML pipeline
+
+---
+
+## 16. 🔮 Next Steps
+
+### Immediate:
+
+* Model training & evaluation
+* Hyperparameter tuning
+* Integrate ML into FastAPI
+
+### Enhancements:
+
+* Real-time prediction API
+* Dashboard ML overlay
+* Alert system
+
+### Advanced:
+
+* Blockchain logging (tamper-proof records)
+* Secure MQTT (TLS)
+* Edge deployment
+
+---
+
+## 17. 🧠 Core Innovation
+
+> Detection is based on **behavioral fingerprinting**, not identity.
+
+Even if attacker clones:
+
+* UID ✅
+* Firmware ✅
+* Device ID ✅
+
+They **cannot replicate behavior perfectly**
+
+---
+
+## 18. 🎯 Final Goal
+
+Build a **real-time intelligent IoT security system** that:
+
+* Detects attacks instantly
+* Learns from behavior
+* Provides explainable decisions
+* Ensures data integrity
+
+---
+
+## 19. ⚡ One-Line Summary
+
+Behavior-based IoT intrusion detection system using real-time telemetry, time-series analytics, and machine learning.
+
+---

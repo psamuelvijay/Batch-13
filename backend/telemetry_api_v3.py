@@ -59,7 +59,8 @@ SCALER_PATH = f"{MODEL_DIR}/scaler_v3.pkl"
 XGBOOST_PATH = f"{MODEL_DIR}/xgboost_binary_v3.pkl"
 METADATA_PATH = f"{MODEL_DIR}/metadata_v3.pkl"
 
-TRAINING_MODE = True  # Set to False for demo
+TRAINING_MODE = True   # Set to False for demo
+HLF_ENABLED   = False  # Set to True only when Hyperledger Fabric is installed (requires Linux/WSL2)
 
 # QUARANTINE Configuration
 QUARANTINE_THRESHOLD = 3  # Block after 3 violations
@@ -144,8 +145,11 @@ async def startup():
     
     # Initialize HLF client
     print("\n[4/5] Initializing blockchain client...")
-    hlf_client.start()
-    print("✅ HLF client ready")
+    if HLF_ENABLED:
+        hlf_client.start()
+        print("✅ HLF client ready")
+    else:
+        print("⚠️  HLF disabled (set HLF_ENABLED=True when Fabric is available)")
     
     # Start MQTT listener
     print("\n[5/5] Starting MQTT subscriber...")
@@ -165,7 +169,8 @@ async def shutdown():
     print("\n🛑 Shutting down...")
     if influx_client:
         influx_client.close()
-    hlf_client.stop()
+    if HLF_ENABLED:
+        hlf_client.stop()
     print("✅ Shutdown complete")
 
 # ============================================================
@@ -386,17 +391,18 @@ def process_telemetry(packet: TelemetryPacket):
     print(f"✅ Signed: {uid} → {final_verdict}")
     
     # Layer 3: Blockchain (async audit trail)
-    hlf_client.submit_verdict({
-        "deviceId": packet.device_id,
-        "uid": uid,
-        "firmware": packet.firmware_hash,
-        "verdict": final_verdict,
-        "temperature": packet.temperature,
-        "humidity": packet.humidity,
-        "interval": packet.interval,
-        "timestamp": packet.timestamp
-    })
-    print(f"📝 Queued for HLF: {uid}")
+    if HLF_ENABLED:
+        hlf_client.submit_verdict({
+            "deviceId": packet.device_id,
+            "uid": uid,
+            "firmware": packet.firmware_hash,
+            "verdict": final_verdict,
+            "temperature": packet.temperature,
+            "humidity": packet.humidity,
+            "interval": packet.interval,
+            "timestamp": packet.timestamp
+        })
+        print(f"📝 Queued for HLF: {uid}")
 
 # ============================================================
 # FEATURE EXTRACTION FOR ML
@@ -475,7 +481,7 @@ async def stats():
             "chain_valid": merkle_stats['chain_valid'],
             "merkle_root": merkle_stats['merkle_root']
         },
-        "hlf_queue_size": hlf_client.get_queue_size()
+        "hlf_queue_size": hlf_client.queue.qsize() if HLF_ENABLED else 0
     }
 
 @app.get("/verify-logs")

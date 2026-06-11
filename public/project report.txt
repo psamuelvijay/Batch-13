@@ -1,0 +1,90 @@
+Section 1: Abstract (200 words)
+
+Problem: IoT credential theft defeats traditional security
+Solution: Behavioral fingerprinting + hybrid blockchain
+Results: 92% accuracy, sub-second detection, quarantine defense
+
+Section 2: Introduction
+
+IoT security crisis statistics
+Limitations of credential-based security
+Research question: "Can behavioral analysis + blockchain detect credential theft?"
+
+Section 3: Related Work (Compare to Existing Solutions)
+
+Feature                     Traditional IDS       ML-Only IDS       Our System
+Credential theft detection    ❌                    ✅                ✅
+Real-time (<1s)               ✅                    ⚠️                ✅
+Tamper-proof logging          ❌                    ❌                ✅
+Active defense                ❌                    ❌                ✅
+Multi-party audit             ❌                    ❌                ✅
+
+Section 4: System Architecture
+
+Hardware setup (ESP32 + DHT11)
+Data flow diagram (MQTT → FastAPI → 3 layers)
+6-step processing pipeline
+3-layer logging (InfluxDB + Merkle + Blockchain)
+
+Section 5: Attack Taxonomy
+
+5 attack types (CLONE, TAMPER, ANOMALY, CLONE+ANOMALY, FULL)
+Real-world scenarios for each
+Detection methodology per attack
+
+Section 6: Behavioral Fingerprinting
+
+16 engineered features
+Why timing patterns matter
+Why sensor noise matters
+Why interval jitter matters
+
+Section 7: ML Pipeline
+
+Dataset: 1543 samples, 5 classes
+Models: Isolation Forest, XGBoost, Random Forest
+Training: SMOTE balancing, 5-fold CV
+Evaluation: 92% accuracy, confusion matrix, ROC curve
+
+Section 8: Hybrid Blockchain Architecture
+
+Why NOT pure blockchain (latency)
+Why NOT just database (tampering)
+Merkle tree design (SHA-256, chain linking)
+HLF integration (async worker, consensus)
+
+Section 9: Quarantine Defense
+
+Violation tracking mechanism
+Threshold-based triggering (3 violations)
+Auto-expiry (5 minutes)
+Impact: Transforms detection → prevention
+
+Section 10: Experimental Results
+
+Dataset statistics
+Model performance metrics
+Detection latency measurements
+False positive/negative rates
+Comparison vs baseline (rule-based only)
+
+Section 11: Discussion
+
+Strengths: Real hardware, comprehensive taxonomy, hybrid architecture
+Limitations: Controlled environment, single sensor type, 92% not 100%
+Lessons learned: Data leakage detection, realistic data importance
+
+Section 12: Future Work
+
+TLS/encryption for production
+Multi-sensor fusion (temp + humidity + vibration + current draw)
+Adaptive quarantine (adjust threshold based on attack sophistication)
+Edge deployment (run ML on ESP32 itself)
+Federated learning (devices learn collaboratively)
+
+Section 13: Conclusion
+
+Proved behavioral analysis defeats credential theft
+Hybrid blockchain achieves speed + trust
+Real hardware validation demonstrates feasibility
+92% accuracy sufficient for production deployment
