@@ -85,20 +85,6 @@ float readRealHumidity() {
   return h;
 }
 
-// ---- Manipulated readings (subtle — stays near legit range to force ML work) ----
-
-float subtlyHighTemp() {
-  // +3 to +6°C above real reading — stays in ambiguous zone
-  float real = readRealTemperature();
-  return real + random(30, 60) / 10.0;
-}
-
-float subtlyLowHumidity() {
-  // -5 to -12% below real reading — stays in ambiguous zone
-  float real = readRealHumidity();
-  return real - random(50, 120) / 10.0;
-}
-
 // ---------------- SETUP ----------------
 
 void setup() {
@@ -128,6 +114,13 @@ void loop() {
 
   client.loop();
 
+  // Read sensor ONCE per loop — DHT11 needs 2s between reads.
+  // All attack cases use these cached values to avoid NaN fallbacks.
+  float rawTemp = dht.readTemperature();
+  float rawHumi = dht.readHumidity();
+  if (isnan(rawTemp)) rawTemp = 30.0 + random(-20, 20) / 10.0;
+  if (isnan(rawHumi)) rawHumi = 50.0 + random(-20, 20) / 10.0;
+
   // Randomly select attack type each packet
   int attack_type = random(0, 5);
 
@@ -140,69 +133,49 @@ void loop() {
   switch (attack_type) {
 
     case 0:
-      // --------------------------------------------------------
-      // CLONE ONLY — uses LEGIT UID + LEGIT FIRMWARE + real sensors
-      // Interval slightly faster than legit (subtle behavioral tell)
-      // Legit: 4950–5050ms. Ghost clone: 4700–4950ms (faster, overlaps edge)
-      // --------------------------------------------------------
       device_uid    = LEGIT_UID;
       firmware_hash = LEGIT_FIRMWARE;
-      temperature   = readRealTemperature();
-      humidity      = readRealHumidity();
+      temperature   = rawTemp;
+      humidity      = rawHumi;
       delay_time    = random(4700, 4950);
       Serial.println("ATTACK: BEHAVIORAL CLONE (legit UID, faster interval)");
       break;
 
     case 1:
-      // --------------------------------------------------------
-      // TAMPER ONLY — uses LEGIT UID, bad firmware, real sensors
-      // Interval slightly irregular but overlapping
-      // --------------------------------------------------------
       device_uid    = LEGIT_UID;
       firmware_hash = BAD_FIRMWARE;
-      temperature   = readRealTemperature();
-      humidity      = readRealHumidity();
+      temperature   = rawTemp;
+      humidity      = rawHumi;
       delay_time    = 5000 + random(-120, 120);
-      Serial.println("ATTACK: TAMPER (legit UID, bad firmware, irregular interval)");
+      Serial.println("ATTACK: TAMPER (bad firmware, normal sensors)");
       break;
 
     case 2:
-      // --------------------------------------------------------
-      // ANOMALY ONLY — legit identity, clearly manipulated sensors
-      // Temperature pushed above 40°C so rule-based catches it too
-      // giving the dataset labeled ANOMALY examples
-      // --------------------------------------------------------
+      // Push clearly above rule threshold: temp > 40, humidity < 20
       device_uid    = LEGIT_UID;
       firmware_hash = LEGIT_FIRMWARE;
-      temperature   = readRealTemperature() + random(80, 130) / 10.0; // +8 to +13°C → clearly > 40
-      humidity      = readRealHumidity()    - random(150, 250) / 10.0; // -15 to -25% → may go < 20
+      temperature   = rawTemp + random(80, 130) / 10.0;  // +8 to +13°C
+      humidity      = rawHumi - random(150, 250) / 10.0; // -15 to -25%
       delay_time    = random(4600, 5400);
-      Serial.println("ATTACK: SENSOR ANOMALY (clear out-of-range manipulation)");
+      Serial.println("ATTACK: SENSOR ANOMALY (out-of-range)");
       break;
 
     case 3:
-      // --------------------------------------------------------
-      // CLONE + ANOMALY — legit UID, clearly anomalous sensors + faster interval
-      // --------------------------------------------------------
       device_uid    = LEGIT_UID;
       firmware_hash = LEGIT_FIRMWARE;
-      temperature   = readRealTemperature() + random(80, 130) / 10.0;
-      humidity      = readRealHumidity()    - random(150, 250) / 10.0;
+      temperature   = rawTemp + random(80, 130) / 10.0;
+      humidity      = rawHumi - random(150, 250) / 10.0;
       delay_time    = random(4400, 4900);
-      Serial.println("ATTACK: CLONE + SENSOR ANOMALY (clear manipulation)");
+      Serial.println("ATTACK: CLONE + SENSOR ANOMALY");
       break;
 
     case 4:
-      // --------------------------------------------------------
-      // FULL ATTACK — bad firmware + clear sensor anomaly + fast interval
-      // All three detection signals active simultaneously
-      // --------------------------------------------------------
       device_uid    = LEGIT_UID;
       firmware_hash = BAD_FIRMWARE;
-      temperature   = readRealTemperature() + random(100, 150) / 10.0; // +10 to +15°C
-      humidity      = readRealHumidity()    - random(200, 300) / 10.0; // -20 to -30%
+      temperature   = rawTemp + random(100, 150) / 10.0; // +10 to +15°C
+      humidity      = rawHumi - random(200, 300) / 10.0; // -20 to -30%
       delay_time    = random(3800, 4600);
-      Serial.println("ATTACK: FULL (bad firmware + clear anomaly + fast interval)");
+      Serial.println("ATTACK: FULL (bad firmware + anomaly + fast interval)");
       break;
   }
 
