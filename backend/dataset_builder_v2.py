@@ -139,6 +139,11 @@ print(f"Rows after dropping incomplete windows: {len(df)}")
 
 print("\n[6/7] Converting verdicts to labels...")
 
+# CRITICAL: Use 'source' tag as binary ground truth, NOT verdict.
+# Rule-based verdict misses stealthy ghost attacks (cases 0,2,3).
+# source=ghost → attack regardless of what the rule engine said.
+# verdict is still used for multi-class labeling (TAMPER/ANOMALY type).
+
 def parse_verdict(v):
     v = str(v).upper()
     return {
@@ -151,26 +156,32 @@ def parse_verdict(v):
 labels = df["verdict"].apply(parse_verdict).apply(pd.Series)
 df = pd.concat([df, labels], axis=1)
 
-# Binary: 0 = TRUSTED, 1 = any attack
-df["attack_flag"] = (
-    (df["is_clone"] == 1) |
-    (df["is_tamper"] == 1) |
-    (df["is_anomaly"] == 1)
-).astype(int)
+# Binary attack_flag: ground truth from source tag
+# ghost = attack (1), legit = normal (0)
+df["attack_flag"] = (df["source"] == "ghost").astype(int)
 
-# Multi-class label
+# For multi-class: use verdict for detected attacks,
+# but any undetected ghost packet (verdict=TRUSTED but source=ghost)
+# gets class 5 = STEALTHY (behavioral only, no rule trigger)
 def get_attack_class(row):
-    if row["is_trusted"]:      return 0  # TRUSTED
-    if row["is_clone"]  and row["is_tamper"] and row["is_anomaly"]: return 1
-    if row["is_clone"]  and row["is_anomaly"]:  return 1
-    if row["is_clone"]:        return 2  # CLONE ONLY
-    if row["is_tamper"]:       return 3  # TAMPER ONLY
-    if row["is_anomaly"]:      return 4  # ANOMALY ONLY
-    return 5
+    if row["source"] == "legit":       return 0  # TRUSTED/NORMAL
+    if row["is_tamper"] and row["is_anomaly"]: return 1  # TAMPER+ANOMALY
+    if row["is_clone"]  and row["is_anomaly"]: return 1  # CLONE+ANOMALY
+    if row["is_tamper"]:               return 2  # TAMPER ONLY
+    if row["is_anomaly"]:              return 3  # ANOMALY ONLY
+    if row["is_clone"]:                return 4  # CLONE ONLY (rule caught it)
+    return 5  # STEALTHY — ghost but rule-based missed it (behavioral only)
 
 df["attack_class"] = df.apply(get_attack_class, axis=1)
 
-print(f"Class distribution:\n{df['attack_flag'].value_counts().to_string()}")
+print(f"Binary label (source-based):")
+print(f"  Normal (legit):  {(df['attack_flag']==0).sum()}")
+print(f"  Attack (ghost):  {(df['attack_flag']==1).sum()}")
+print(f"\nMulti-class breakdown:")
+class_names = {0:"NORMAL",1:"TAMPER+ANOMALY",2:"TAMPER",
+               3:"ANOMALY",4:"CLONE",5:"STEALTHY"}
+for cls, cnt in df["attack_class"].value_counts().sort_index().items():
+    print(f"  {class_names.get(cls,'?')}: {cnt}")
 
 # ---------------- STEP 7: TIME-BASED TRAIN/TEST SPLIT MARKER ----------------
 
@@ -192,6 +203,7 @@ for split in ["train", "test"]:
 # ---------------- FINALIZE & SAVE ----------------
 
 # Drop original text/identity columns — NOT used as features
+# source is kept until labels are generated (above), now drop it
 drop_cols = ["verdict", "source"]
 if time_col and time_col in df.columns:
     drop_cols.append(time_col)
