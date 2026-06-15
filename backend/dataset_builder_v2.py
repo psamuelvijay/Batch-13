@@ -107,31 +107,26 @@ print("Added: interval_deviation")
 print(f"\n[5/7] Computing per-device rolling window features (window={WINDOW_SIZE})...")
 
 # CRITICAL FIX: group by source so ghost windows never contaminate legit windows
-df = df.sort_values([time_col if time_col else df.index.name or "index"]).reset_index(drop=True)
+if time_col:
+    df = df.sort_values(time_col).reset_index(drop=True)
+else:
+    df = df.reset_index(drop=True)
 
 groups = []
 for source_val, group in df.groupby("source", sort=False):
     group = group.copy().reset_index(drop=True)
 
-    # Rolling interval stats
+    # Only rolling interval mean — captures timing pattern over recent packets
+    # Temperature/humidity means removed: they amplify the sensor manipulation
+    # signal into near-perfect predictors (temp_mean ~0.95 correlation)
     group["interval_mean"] = group["interval"].rolling(WINDOW_SIZE, min_periods=2).mean()
-    group["interval_std"]  = group["interval"].rolling(WINDOW_SIZE, min_periods=2).std()
-
-    # Rolling temperature stats
-    group["temp_mean"]     = group["temperature"].rolling(WINDOW_SIZE, min_periods=2).mean()
-    group["temp_std"]      = group["temperature"].rolling(WINDOW_SIZE, min_periods=2).std()
-
-    # Rolling humidity stats
-    group["humid_mean"]    = group["humidity"].rolling(WINDOW_SIZE, min_periods=2).mean()
-    group["humid_std"]     = group["humidity"].rolling(WINDOW_SIZE, min_periods=2).std()
 
     groups.append(group)
 
 df = pd.concat(groups).sort_values(time_col if time_col else df.index.name or "index").reset_index(drop=True)
 
 # Drop rows with NaN windows (first few rows per device have no history)
-df = df.dropna(subset=["interval_mean", "interval_std", "temp_mean",
-                        "temp_std", "humid_mean", "humid_std"])
+df = df.dropna(subset=["interval_mean"])
 
 print(f"Rows after dropping incomplete windows: {len(df)}")
 

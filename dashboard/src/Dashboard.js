@@ -1,47 +1,127 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { Shield, AlertTriangle, Database, Lock, Activity, Clock } from 'lucide-react';
+import { AlertTriangle, Database, Lock, Activity, Clock, CheckCircle, XCircle } from 'lucide-react';
+import logo from './assets/favicon.png';
 import './Dashboard.css';
 
 const API_URL = 'http://localhost:8000';
 
+// ── small helpers ──────────────────────────────────────────
+function timeStr(date) {
+  return date.toLocaleTimeString('en-US', {
+    hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
+  });
+}
+
+function elapsed(date) {
+  const s = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (s < 60)  return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+// ── Merkle verification modal ──────────────────────────────
+function MerkleModal({ result, onClose }) {
+  if (!result) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>🔒 Merkle Chain Verification</h3>
+          <button className="modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          <div className="modal-row">
+            <span className="modal-label">Status</span>
+            <span className={`status-badge ${result.chain_valid ? 'status-valid' : 'status-invalid'}`}>
+              {result.chain_valid ? '✅ VALID' : '❌ INVALID'}
+            </span>
+          </div>
+          <div className="modal-row">
+            <span className="modal-label">Entries</span>
+            <span className="modal-value">{result.total_entries ?? '—'}</span>
+          </div>
+          <div className="modal-row">
+            <span className="modal-label">Merkle Root</span>
+            <code className="merkle-root modal-root">{result.merkle_root ? result.merkle_root.slice(0, 20) + '…' : '—'}</code>
+          </div>
+          <div className="modal-row">
+            <span className="modal-label">Message</span>
+            <span className="modal-value modal-msg">{result.message ?? result.chain_message ?? '—'}</span>
+          </div>
+          <div className="modal-row">
+            <span className="modal-label">Verified At</span>
+            <span className="modal-value">{timeStr(new Date())}</span>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-primary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────
 function Dashboard() {
-  const [stats, setStats] = useState(null);
+  const [stats, setStats]                   = useState(null);
   const [violationHistory, setViolationHistory] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [lastUpdate, setLastUpdate] = useState(new Date());
+  const [loading, setLoading]               = useState(true);
+  const [error, setError]                   = useState(null);
+  const [lastUpdate, setLastUpdate]         = useState(new Date());
+  const [lastVerified, setLastVerified]     = useState(null);   // date of last verify click
+  const [merkleResult, setMerkleResult]     = useState(null);   // modal data
+  const [recentEvents, setRecentEvents]     = useState([]);     // [{time, verdict}]
+  const [detectionBreakdown, setDetectionBreakdown] = useState({ ANOMALY: 0, TAMPER: 0, CLONE: 0 });
+  const [deviceLastSeen, setDeviceLast]     = useState({});     // {uid: Date}
+  const prevViolations                      = useRef({});
 
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const response = await axios.get(`${API_URL}/stats`);
-        setStats(response.data);
+        const res = await axios.get(`${API_URL}/stats`);
+        const data = res.data;
+        setStats(data);
         setLoading(false);
-        setLastUpdate(new Date());
+        const now = new Date();
+        setLastUpdate(now);
 
-        // Update violation history for chart
-        const totalViolations = Object.values(response.data.violations || {})
-          .reduce((sum, count) => sum + count, 0);
-        
-        setViolationHistory(prev => {
-          const newHistory = [
-            ...prev,
-            {
-              time: new Date().toLocaleTimeString('en-US', { 
-                hour12: false, 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit' 
-              }),
-              total: totalViolations,
-              quarantined: response.data.quarantined_devices?.length || 0
-            }
-          ];
-          // Keep last 30 data points
-          return newHistory.slice(-30);
+        // ── violation history for chart ──
+        const totalV = Object.values(data.violations || {}).reduce((a, b) => a + b, 0);
+        setViolationHistory(prev => [
+          ...prev,
+          {
+            time: timeStr(now),
+            total: totalV,
+            quarantined: data.quarantined_devices?.length || 0
+          }
+        ].slice(-30));
+
+        // ── detect new violations → recent events + breakdown ──
+        const prev = prevViolations.current;
+        const curr = data.violations || {};
+        Object.entries(curr).forEach(([uid, count]) => {
+          if (count > (prev[uid] || 0)) {
+            // Updated dynamically via /recent-events endpoint setup
+          }
         });
+        prevViolations.current = { ...curr };
+
+        // ── detection breakdown from verdict_breakdown if backend sends it ──
+        if (data.verdict_breakdown) {
+          const vb = data.verdict_breakdown;
+          setDetectionBreakdown({
+            ANOMALY: (vb['ANOMALY'] || 0) + (vb['TAMPER|ANOMALY'] || 0),
+            TAMPER:  (vb['TAMPER']  || 0) + (vb['TAMPER|ANOMALY'] || 0),
+            CLONE:   vb['CLONE']    || 0,
+          });
+        }
+
+        // ── device last seen ──
+        const seen = {};
+        Object.keys(data.violations || {}).forEach(uid => { seen[uid] = now; });
+        setDeviceLast(prev => ({ ...prev, ...seen }));
 
       } catch (err) {
         console.error('Fetch error:', err);
@@ -50,35 +130,66 @@ function Dashboard() {
       }
     };
 
-    fetchStats(); // Initial fetch
-    const interval = setInterval(fetchStats, 2000); // Update every 2s
+    fetchStats();
+    const iv = setInterval(fetchStats, 2000);
+    return () => clearInterval(iv);
+  }, []);
 
-    return () => clearInterval(interval);
+  // ── also poll /verify-logs silently to keep merkle info fresh ──
+  useEffect(() => {
+    const pollVerify = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/verify-logs`);
+        setStats(prev => prev ? {
+          ...prev,
+          merkle_chain: {
+            ...prev.merkle_chain,
+            chain_valid: res.data.chain_valid,
+            message: res.data.message,
+          }
+        } : prev);
+      } catch (_) {}
+    };
+    const iv = setInterval(pollVerify, 10000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // ── poll /recent-events every 3s ──
+  useEffect(() => {
+    const pollEvents = async () => {
+      try {
+        const res = await axios.get(`${API_URL}/recent-events`);
+        if (res.data.events?.length > 0) {
+          setRecentEvents(res.data.events);
+        }
+      } catch (_) {}
+    };
+    pollEvents();
+    const iv = setInterval(pollEvents, 3000);
+    return () => clearInterval(iv);
   }, []);
 
   const verifyMerkleChain = async () => {
     try {
-      const response = await axios.get(`${API_URL}/verify-logs`);
-      alert(
-        `Merkle Chain Verification:\n\n` +
-        `Status: ${response.data.chain_valid ? '✅ VALID' : '❌ INVALID'}\n` +
-        `Total Entries: ${response.data.total_entries}\n` +
-        `Merkle Root: ${response.data.merkle_root}\n` +
-        `Message: ${response.data.chain_message}`
-      );
+      const res = await axios.get(`${API_URL}/verify-logs`);
+      setMerkleResult({
+        chain_valid:   res.data.chain_valid,
+        message:       res.data.message,
+        total_entries: stats?.merkle_chain?.total_entries,
+        merkle_root:   stats?.merkle_chain?.merkle_root,
+      });
+      setLastVerified(new Date());
     } catch (err) {
-      alert(`Verification failed: ${err.message}`);
+      setMerkleResult({ chain_valid: false, message: err.message });
     }
   };
 
   const releaseQuarantine = async (uid) => {
     if (!window.confirm(`Release ${uid} from quarantine?`)) return;
-    
     try {
       await axios.post(`${API_URL}/quarantine/${uid}/release`);
-      alert(`✅ ${uid} released from quarantine`);
     } catch (err) {
-      alert(`❌ Failed to release: ${err.message}`);
+      alert(`Failed to release: ${err.message}`);
     }
   };
 
@@ -102,15 +213,28 @@ function Dashboard() {
     );
   }
 
+  const totalViolations = Object.values(stats?.violations || {}).reduce((a, b) => a + b, 0);
+  const merkleEntries   = stats?.merkle_chain?.total_entries || 0;
+  const merkleValid     = stats?.merkle_chain?.chain_valid ?? true;
+  const merkleRoot      = stats?.merkle_chain?.merkle_root || '';
+
   return (
     <div className="dashboard">
+      {/* Merkle Modal */}
+      {merkleResult && <MerkleModal result={merkleResult} onClose={() => setMerkleResult(null)} />}
+
       {/* Header */}
       <header className="header">
         <div className="header-left">
-          <Shield size={32} className="logo" />
+          {/* FIXED: changed lassName to className below */}
+          <img
+            src={logo}
+            alt="PhantomGuard"
+            className="logo-image"
+          />
           <div>
-            <h1>IoT Intrusion Detection System</h1>
-            <p className="subtitle">Real-time Behavioral Analysis & Blockchain Logging</p>
+            <h1>PhantomGuard</h1>
+            <p className="subtitle">Real-time Behavioral Analysis &amp; Dual-Layer Blockchain Logging</p>
           </div>
         </div>
         <div className="header-right">
@@ -125,133 +249,182 @@ function Dashboard() {
         </div>
       </header>
 
-      {/* Metrics Grid */}
+      {/* Metric Cards */}
       <div className="metrics-grid">
         <MetricCard
           icon={<Database />}
           title="Devices Tracked"
           value={stats?.devices_tracked || 0}
           color="#3b82f6"
-          trend="+2 this session"
+          trend="Active monitoring"
         />
         <MetricCard
           icon={<AlertTriangle />}
           title="Total Violations"
-          value={Object.values(stats?.violations || {}).reduce((a, b) => a + b, 0)}
+          value={totalViolations}
           color="#f59e0b"
-          trend="Real-time monitoring"
-        />
-        <MetricCard
-          icon={<Shield />}
-          title="Quarantined Devices"
-          value={stats?.quarantined_devices?.length || 0}
-          color="#ef4444"
-          trend={stats?.quarantined_devices?.length > 0 ? "Active defense!" : "All clear"}
+          trend="Rule-based detections"
         />
         <MetricCard
           icon={<Lock />}
-          title="Merkle Chain"
-          value={stats?.merkle_chain?.total_entries || 0}
+          title="Audit Entries"
+          value={merkleEntries}
           color="#10b981"
-          trend={stats?.merkle_chain?.chain_valid ? "✅ Valid" : "❌ Invalid"}
+          trend={merkleValid ? '✅ Chain valid' : '❌ Chain invalid'}
+        />
+        <MetricCard
+          icon={<Activity />}
+          title="Blockchain Queue"
+          value={stats?.hlf_queue_size || 0}
+          color="#8b5cf6"
+          trend="HLF pending txns"
         />
       </div>
 
-      {/* Quarantine Alert Banner */}
+      {/* Quarantine alert banner */}
       {stats?.quarantined_devices?.length > 0 && (
         <div className="alert alert-danger">
           <AlertTriangle size={24} />
           <div className="alert-content">
             <strong>🚨 Active Quarantine</strong>
             <p>
-              {stats.quarantined_devices.length} device{stats.quarantined_devices.length > 1 ? 's' : ''} currently blocked: {' '}
+              {stats.quarantined_devices.length} device{stats.quarantined_devices.length > 1 ? 's' : ''} blocked:{' '}
               <code>{stats.quarantined_devices.join(', ')}</code>
             </p>
           </div>
         </div>
       )}
 
-      {/* Charts Row */}
+      {/* Charts + Merkle row */}
       <div className="charts-row">
-        {/* Violation History Chart */}
         <div className="card chart-card">
           <div className="card-header">
             <h2>📈 Violations Over Time</h2>
-            <span className="badge badge-info">{violationHistory.length} data points</span>
+            <span className="badge badge-info">{violationHistory.length} points</span>
           </div>
           <ResponsiveContainer width="100%" height={250}>
             <LineChart data={violationHistory}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis 
-                dataKey="time" 
-                stroke="#94a3b8" 
-                tick={{ fontSize: 12 }}
-                interval="preserveStartEnd"
-              />
+              <XAxis dataKey="time" stroke="#94a3b8" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
               <YAxis stroke="#94a3b8" />
-              <Tooltip 
-                contentStyle={{ 
-                  background: '#1e293b', 
-                  border: '1px solid #475569',
-                  borderRadius: '8px',
-                  color: '#e2e8f0'
-                }} 
-              />
-              <Line 
-                type="monotone" 
-                dataKey="total" 
-                stroke="#f59e0b" 
-                strokeWidth={2}
-                name="Total Violations"
-                dot={{ fill: '#f59e0b', r: 3 }}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="quarantined" 
-                stroke="#ef4444" 
-                strokeWidth={2}
-                name="Quarantined"
-                dot={{ fill: '#ef4444', r: 3 }}
-              />
+              <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: '8px', color: '#e2e8f0' }} />
+              <Line type="monotone" dataKey="total" stroke="#f59e0b" strokeWidth={2} name="Violations" dot={{ fill: '#f59e0b', r: 3 }} />
+              <Line type="monotone" dataKey="quarantined" stroke="#ef4444" strokeWidth={2} name="Quarantined" dot={{ fill: '#ef4444', r: 3 }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Merkle Chain Info */}
+        {/* Cryptographic Audit */}
         <div className="card">
           <div className="card-header">
-            <h2>🔒 Cryptographic Verification</h2>
-            <button className="btn btn-primary" onClick={verifyMerkleChain}>
-              Verify Chain
-            </button>
+            <h2>🔒 Cryptographic Audit</h2>
+            <button className="btn btn-primary" onClick={verifyMerkleChain}>Verify Chain</button>
           </div>
           <div className="merkle-info">
             <div className="info-item">
-              <span className="info-label">Chain Status:</span>
-              <span className={`status-badge ${stats?.merkle_chain?.chain_valid ? 'status-valid' : 'status-invalid'}`}>
-                {stats?.merkle_chain?.chain_valid ? '✅ Valid' : '❌ Invalid'}
+              <span className="info-label">Chain Status</span>
+              <span className={`status-badge ${merkleValid ? 'status-valid' : 'status-invalid'}`}>
+                {merkleValid
+                  ? <><CheckCircle size={13} style={{marginRight:4}}/>Valid</>
+                  : <><XCircle size={13} style={{marginRight:4}}/>Invalid</>}
               </span>
             </div>
             <div className="info-item">
-              <span className="info-label">Total Entries:</span>
-              <span className="info-value">{stats?.merkle_chain?.total_entries || 0}</span>
+              <span className="info-label">Total Entries</span>
+              <span className="info-value">{merkleEntries} logged</span>
             </div>
             <div className="info-item">
-              <span className="info-label">Merkle Root:</span>
-              <code className="merkle-root">{stats?.merkle_chain?.merkle_root || 'N/A'}</code>
+              <span className="info-label">Merkle Root</span>
+              <code className="merkle-root">{merkleRoot ? merkleRoot.slice(0, 16) + '…' : 'N/A'}</code>
             </div>
             <div className="info-item">
-              <span className="info-label">HLF Queue:</span>
+              <span className="info-label">Last Verified</span>
               <span className="info-value">
-                {stats?.hlf_queue_size || 0} pending
-                {stats?.hlf_queue_size > 0 && <Activity size={14} className="pulse-icon" />}
+                {lastVerified ? elapsed(lastVerified) : 'Not yet verified'}
               </span>
+            </div>
+            <div className="info-item">
+              <span className="info-label">HLF Queue</span>
+              <span className="info-value">{stats?.hlf_queue_size || 0} pending</span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Violations Table */}
+      {/* Detection Breakdown + Recent Events Row */}
+      <div className="charts-row">
+        {/* Detection Breakdown */}
+        <div className="card">
+          <div className="card-header">
+            <h2>🛡️ Detection Breakdown</h2>
+            <span className="badge badge-secondary">rule-based</span>
+          </div>
+          <div className="breakdown-grid">
+            <div className="breakdown-item breakdown-anomaly">
+              <span className="breakdown-label">ANOMALY</span>
+              <span className="breakdown-value">
+                {detectionBreakdown.ANOMALY}
+              </span>
+              <span className="breakdown-hint">Sensor / interval out of range</span>
+            </div>
+            <div className="breakdown-item breakdown-tamper">
+              <span className="breakdown-label">TAMPER</span>
+              <span className="breakdown-value">
+                {detectionBreakdown.TAMPER}
+              </span>
+              <span className="breakdown-hint">Firmware hash mismatch</span>
+            </div>
+            <div className="breakdown-item breakdown-clone">
+              <span className="breakdown-label">STEALTHY</span>
+              <span className="breakdown-value">{detectionBreakdown.CLONE || '—'}</span>
+              <span className="breakdown-hint">ML-only detections (post-training)</span>
+            </div>
+          </div>
+          <p className="breakdown-note">
+            Full per-type breakdown available after ML model training.
+          </p>
+        </div>
+
+        {/* Recent Security Events */}
+        <div className="card">
+          <div className="card-header">
+            <h2>⚡ Recent Security Events</h2>
+            <span className="badge badge-secondary">last 5</span>
+          </div>
+          {recentEvents.length === 0 ? (
+            <div className="empty-state" style={{padding:'1.5rem'}}>
+              <Activity size={32} style={{opacity:0.4}}/>
+              <p style={{marginTop:'0.5rem'}}>Waiting for events…</p>
+              <p className="empty-hint">Violations will appear here in real time</p>
+            </div>
+          ) : (
+            <div className="table-container">
+              <table className="violations-table">
+                <thead>
+                  <tr><th>Time</th><th>Type</th><th>Device</th></tr>
+                </thead>
+                <tbody>
+                  {recentEvents.slice(-5).reverse().map((ev, i) => (
+                    <tr key={i}>
+                      <td style={{color:'var(--text-secondary)', fontSize:'0.8rem'}}>{ev.time}</td>
+                      <td>
+                        <span className={`badge ${
+                          ev.verdict.includes('TAMPER') ? 'badge-danger' :
+                          ev.verdict.includes('ANOMALY') ? 'badge-warning' :
+                          'badge-info'
+                        }`}>{ev.verdict}</span>
+                      </td>
+                      <td><code className="uid-code" style={{fontSize:'0.7rem'}}>{ev.uid?.slice(0,8)}…</code></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Device Violation Table */}
       <div className="card">
         <div className="card-header">
           <h2>📊 Device Violation Tracking</h2>
@@ -259,10 +432,13 @@ function Dashboard() {
             {Object.keys(stats?.violations || {}).length} devices monitored
           </span>
         </div>
-        
         {Object.keys(stats?.violations || {}).length === 0 ? (
           <div className="empty-state">
-            <Shield size={48} />
+            <img
+              src={logo}
+              alt="PhantomGuard"
+              className="empty-logo"
+            />
             <p>No violations detected yet</p>
             <p className="empty-hint">System is monitoring all incoming telemetry</p>
           </div>
@@ -273,48 +449,36 @@ function Dashboard() {
                 <tr>
                   <th>Device UID</th>
                   <th>Violations</th>
+                  <th>Last Seen</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {Object.entries(stats?.violations || {})
-                  .sort(([, a], [, b]) => b - a) // Sort by violations (highest first)
+                  .sort(([, a], [, b]) => b - a)
                   .map(([uid, count]) => {
-                    const isQuarantined = stats.quarantined_devices?.includes(uid);
+                    const isQ = stats.quarantined_devices?.includes(uid);
+                    const seen = deviceLastSeen[uid];
                     return (
-                      <tr key={uid} className={isQuarantined ? 'row-quarantined' : ''}>
+                      <tr key={uid} className={isQ ? 'row-quarantined' : ''}>
+                        <td><code className="uid-code">{uid}</code></td>
                         <td>
-                          <code className="uid-code">{uid}</code>
-                        </td>
-                        <td>
-                          <span className={`badge ${
-                            count >= 3 ? 'badge-danger' : 
-                            count >= 2 ? 'badge-warning' : 
-                            'badge-info'
-                          }`}>
+                          <span className={`badge ${count >= 3 ? 'badge-danger' : count >= 2 ? 'badge-warning' : 'badge-info'}`}>
                             {count} violation{count !== 1 ? 's' : ''}
                           </span>
                         </td>
-                        <td>
-                          {isQuarantined ? (
-                            <span className="status-quarantined">
-                              <AlertTriangle size={16} />
-                              Quarantined
-                            </span>
-                          ) : (
-                            <span className="status-monitoring">
-                              <Activity size={16} />
-                              Monitoring
-                            </span>
-                          )}
+                        <td style={{color:'var(--text-secondary)', fontSize:'0.8rem'}}>
+                          {seen ? timeStr(seen) : '—'}
                         </td>
                         <td>
-                          {isQuarantined && (
-                            <button 
-                              className="btn btn-small btn-danger"
-                              onClick={() => releaseQuarantine(uid)}
-                            >
+                          {isQ
+                            ? <span className="status-quarantined"><AlertTriangle size={14}/> Quarantined</span>
+                            : <span className="status-monitoring"><Activity size={14}/> Monitoring</span>}
+                        </td>
+                        <td>
+                          {isQ && (
+                            <button className="btn btn-small btn-danger" onClick={() => releaseQuarantine(uid)}>
                               Release
                             </button>
                           )}
@@ -328,9 +492,8 @@ function Dashboard() {
         )}
       </div>
 
-      {/* Footer */}
       <footer className="footer">
-        <p>IoT IDS Dashboard v3.0 | Behavioral Fingerprinting + Hybrid Blockchain Architecture</p>
+        <p>IoT IDS Dashboard v4.0 | Behavioral Fingerprinting + Dual-Layer Blockchain Architecture</p>
         <p className="footer-tech">React + FastAPI + InfluxDB + Merkle Tree + Hyperledger Fabric</p>
       </footer>
     </div>
@@ -340,9 +503,7 @@ function Dashboard() {
 function MetricCard({ icon, title, value, color, trend }) {
   return (
     <div className="metric-card" style={{ borderLeftColor: color }}>
-      <div className="metric-icon" style={{ color }}>
-        {icon}
-      </div>
+      <div className="metric-icon" style={{ color }}>{icon}</div>
       <div className="metric-content">
         <div className="metric-title">{title}</div>
         <div className="metric-value">{value}</div>

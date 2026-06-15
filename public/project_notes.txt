@@ -1,0 +1,140 @@
+================================================================================
+IoT IDS PROJECT NOTES — Batch 13 (2451-23-749-040/051/060)
+MVSREC | IoT Year 3 Sem 2
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT THIS PROJECT IS
+────────────────────────────────────────────────────────────────────────────────
+An IoT Intrusion Detection System that detects cloned/compromised ESP32 devices
+using behavioral fingerprinting rather than identity checks. Two ESP32s with
+DHT11 sensors send telemetry over MQTT. A FastAPI backend runs rule-based +
+ML detection. A React dashboard shows live results. A Merkle tree provides
+tamper-proof local logging. Hyperledger Fabric is the optional blockchain layer.
+
+Key insight: even if an attacker clones a device's UID and firmware hash,
+they cannot perfectly replicate its behavioral patterns (interval timing,
+sensor deviations). That's what ML is trained to catch.
+
+────────────────────────────────────────────────────────────────────────────────
+WHAT WE DID IN THIS CHAT (in order)
+────────────────────────────────────────────────────────────────────────────────
+1.  Initialized GitHub repo (https://github.com/psamuelvijay/Batch-13)
+    - Organized files into backend/, hardware/, dashboard/, models/, docs/
+    - Created .gitignore, README with authors, team details
+
+2.  Full ML audit — found and fixed 7 data leakage sources:
+    - Ghost ESP32 was using FAKE_UID instead of legit UID for clone attacks
+      (trivially detectable, not real cloning) → FIXED in firmware
+    - uid_flag and firmware_flag were features (perfect predictors) → REMOVED
+    - temp_out_of_range and humid_out_of_range were hand-tuned to attack
+      thresholds (zero false positives by design) → REMOVED
+    - Rolling windows computed globally across devices → FIXED to per-device
+    - Random train/test split on block-structured data → FIXED to time-based
+    - SMOTE applied before CV (contaminated validation) → FIXED inside folds
+    - evaluate_results.py loaded wrong (old) model files → FIXED to v4 paths
+    - Result: 100% accuracy was fake; real expected accuracy after fix: 85-95%
+
+3.  Ghost ESP32 firmware fixes:
+    - All attack cases now use LEGIT_UID (real cloning scenario)
+    - DHT11 double-read NaN bug fixed (read once per loop, cache rawTemp/rawHumi)
+    - Sensor manipulation pushed clearly above rule thresholds for ANOMALY cases
+    - Timing lag fixed (delay before send, report delay_time not measured interval)
+    - 5 attack types: behavioral clone, tamper, anomaly, clone+anomaly, full
+
+4.  Dataset builder rewritten (v3):
+    - Removed leaky identity features
+    - Per-device rolling windows
+    - Time-based split marker embedded in CSV
+    - Ground truth label from source tag (not rule-based verdict)
+      → stealthy ghost packets correctly labeled as attacks
+
+5.  Training pipeline rewritten (v4):
+    - Time-based train/test split
+    - SMOTE inside CV folds only
+    - No forbidden features
+    - Saves scaler_v4, xgboost_binary_v4, random_forest_v4, isolation_forest_v4
+
+6.  Data collection performed:
+    - 1566 ghost + 1523 legit packets collected (≈50/50 balance)
+    - 526 stealthy ghost packets (rule-based missed, ML must catch)
+    - 621 TAMPER detections, 419 ANOMALY, 239 TAMPER|ANOMALY
+    - data.csv saved in root folder
+
+7.  Backend fixes:
+    - Removed duplicate app = FastAPI() that was killing CORS → dashboard works
+    - HLF_ENABLED flag added (False by default, no WinError spam)
+    - Added /recent-events endpoint for dashboard live feed
+
+8.  Repo cleanup:
+    - Removed devices/ (redundant with hardware/)
+    - Removed iot-ids-dashboard/ (redundant with dashboard/)
+    - Removed all root-level Python duplicates
+    - hardware/ restructured into ESP_Ghost/ and ESP_Legit/ subfolders
+    - Old v3 visualizations cleared (will be regenerated as v4)
+
+9.  React dashboard upgrades:
+    - Merkle verification: proper modal instead of alert()
+    - Metric cards: replaced "Quarantined" with "Audit Entries" and "Blockchain Queue"
+    - Detection Breakdown card added
+    - Recent Security Events table (live, last 5 non-TRUSTED verdicts)
+    - Device table: Last Seen column added
+    - Chain health: entries count + validity icon + "last verified X ago"
+
+────────────────────────────────────────────────────────────────────────────────
+CURRENT STATE
+────────────────────────────────────────────────────────────────────────────────
+- TRAINING_MODE = True (data collection / rule-based only)
+- HLF_ENABLED = False (no Fabric installed yet)
+- data.csv collected and ready
+- ML models NOT yet trained on new clean data (old v3 models exist but are
+  trained on leaky data — do not use them)
+- dashboard running and connected
+- backend running and receiving MQTT from both ESP32s
+
+────────────────────────────────────────────────────────────────────────────────
+NEXT STEPS (in order)
+────────────────────────────────────────────────────────────────────────────────
+1.  Run dataset_builder_v2.py → generates clean_dataset_v3.csv
+    (run from backend/ folder, data.csv must be in same folder)
+
+2.  Run train_models_v3_FIXED.py → generates v4 model files
+    Check: CV val accuracy should be 85-95%. If still 99%+, re-check features.
+
+3.  Run evaluate_results.py → generates SHAP plots + evaluation_report_v4.txt
+    Copy output PNGs into docs/visualizations/
+
+4.  Set TRAINING_MODE = False in telemetry_api_v3.py
+    → quarantine system activates, violating devices get blocked after 3 hits
+
+5.  (Optional) Set up HLF on WSL2:
+    - Install Hyperledger Fabric test network on Linux/WSL2
+    - Deploy ids-chaincode.js to mychannel
+    - Set HLF_ENABLED = True in telemetry_api_v3.py
+
+6.  Update README with actual v4 model accuracy results
+
+7.  Final demo: run all 4 terminals, show live attack detection on dashboard
+
+────────────────────────────────────────────────────────────────────────────────
+FOR FUTURE DEVELOPERS — IMPORTANT
+────────────────────────────────────────────────────────────────────────────────
+- Always run backend from backend/ folder, not root. Imports are relative.
+- data.csv must be in backend/ folder before running dataset_builder_v2.py.
+- The ground truth label is the source tag (ghost/legit), NOT the verdict field.
+  Do not change this without understanding why — old verdict-based labeling
+  caused 100% fake accuracy because stealthy ghost packets were labeled TRUSTED.
+- Rolling windows MUST be grouped by source/device. Global rolling = data leak.
+- Train/test split MUST be time-based. Random split on this dataset = data leak.
+- SMOTE must run inside CV folds only, not before CV.
+- Ghost ESP32 uses LEGIT UID for all attacks — this is intentional. The whole
+  point is that ML must detect clones from behavior, not identity.
+- TRAINING_MODE=True disables quarantine. Keep it True during data collection.
+  Switch to False only in production/demo.
+- HLF requires Linux (WSL2). Do not try to run peer CLI on Windows natively.
+- The duplicate app=FastAPI() bug was the CORS killer — never add a second
+  app definition in telemetry_api_v3.py.
+- LEGIT_UID = "D00061FE8CE0", LEGIT_FIRMWARE = "dfc2dcd4" — hardcoded in both
+  firmware and backend. If you re-flash with a new chip, update all 3 places.
+
+================================================================================

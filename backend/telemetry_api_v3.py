@@ -70,8 +70,6 @@ QUARANTINE_DURATION = 300  # 5 minutes in seconds
 # GLOBAL STATE
 # ============================================================
 
-app = FastAPI(title="IoT IDS Backend v3.0")
-
 # InfluxDB client
 influx_client = None
 write_api = None
@@ -491,6 +489,22 @@ async def verify_logs():
         "chain_valid": is_valid,
         "message": msg
     }
+
+@app.get("/recent-events")
+async def recent_events():
+    """Return last 10 detection events from Merkle log"""
+    last = log_entries[-10:] if len(log_entries) >= 10 else log_entries
+    events = []
+    for entry in reversed(last):
+        d = entry.get("data", {})
+        verdict = d.get("verdict", "UNKNOWN")
+        if verdict != "TRUSTED":
+            events.append({
+                "time": entry.get("timestamp_iso", "")[:19].replace("T", " "),
+                "verdict": verdict,
+                "uid": d.get("uid", ""),
+            })
+    return {"events": events[:5]}
 
 @app.get("/quarantine/{uid}")
 async def get_quarantine_status(uid: str):
