@@ -54,10 +54,10 @@ LEGIT_UID = "D00061FE8CE0"
 LEGIT_FIRMWARE = "dfc2dcd4"
 
 # ML Model paths
-MODEL_DIR = "models"
-SCALER_PATH = f"{MODEL_DIR}/scaler_v3.pkl"
-XGBOOST_PATH = f"{MODEL_DIR}/xgboost_binary_v3.pkl"
-METADATA_PATH = f"{MODEL_DIR}/metadata_v3.pkl"
+MODEL_DIR = "../models"
+SCALER_PATH = f"{MODEL_DIR}/scaler_v4.pkl"
+XGBOOST_PATH = f"{MODEL_DIR}/xgboost_binary_v4.pkl"
+METADATA_PATH = f"{MODEL_DIR}/metadata_v4.pkl"
 
 TRAINING_MODE = True   # Set to False for demo
 HLF_ENABLED   = False  # Set to True only when Hyperledger Fabric is installed (requires Linux/WSL2)
