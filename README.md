@@ -2,8 +2,6 @@
 
 Real-time behavioral fingerprinting system for detecting cloned and compromised IoT devices using machine learning and cryptographic audit logging.
 
-![Dashboard](public/PhantomGuard_1.png)
-
 ---
 
 ## Overview
@@ -159,8 +157,6 @@ The Ghost device simulates 5 attack scenarios:
 
 ## Dashboard Features
 
-![Explorer](public/PhantomGuard_2.png)
-
 - **Live Metrics** — Devices tracked, violations, audit entries
 - **Violation Charts** — Real-time time-series visualization
 - **Merkle Verification** — One-click cryptographic chain validation
@@ -225,8 +221,6 @@ cd ~/fabric-samples/test-network
 
 Hyperledger Explorer: http://localhost:8080
 
-![HLF Explorer](public/explorer.png)
-
 ---
 
 ## API Endpoints
@@ -271,3 +265,15 @@ Academic project — MVSREC
 ## Acknowledgments
 
 Built with FastAPI, React, InfluxDB, Hyperledger Fabric, and SHAP explainability.
+
+---
+
+## Screenshots
+
+![Dashboard](public/PhantomGuard_1.png)
+
+![Dashboard Detail](public/PhantomGuard_2.png)
+
+![InfluxDB](public/influx-dashboard_1.png)
+
+![Hyperledger Explorer](public/explorer.png)
