@@ -112,9 +112,9 @@ function Dashboard() {
         if (data.verdict_breakdown) {
           const vb = data.verdict_breakdown;
           setDetectionBreakdown({
-            ANOMALY: (vb['ANOMALY'] || 0) + (vb['TAMPER|ANOMALY'] || 0),
-            TAMPER:  (vb['TAMPER']  || 0) + (vb['TAMPER|ANOMALY'] || 0),
-            CLONE:   vb['CLONE']    || 0,
+            ANOMALY: (vb['ANOMALY'] || 0) + (vb['ML_FLAGGED'] || 0),
+            TAMPER:  vb['TAMPER']  || 0,
+            CLONE:   vb['CLONE']   || 0,
           });
         }
 
@@ -274,10 +274,10 @@ function Dashboard() {
         />
         <MetricCard
           icon={<Activity />}
-          title="Blockchain Queue"
-          value={stats?.hlf_queue_size || 0}
+          title="Blockchain Txns"
+          value={stats?.hlf_stats?.total_submitted || 0}
           color="#8b5cf6"
-          trend="HLF pending txns"
+          trend={`✅ ${stats?.hlf_stats?.successful || 0} ok  ❌ ${stats?.hlf_stats?.failed || 0} failed`}
         />
       </div>
 
@@ -344,8 +344,12 @@ function Dashboard() {
               </span>
             </div>
             <div className="info-item">
-              <span className="info-label">HLF Queue</span>
-              <span className="info-value">{stats?.hlf_queue_size || 0} pending</span>
+              <span className="info-label">HLF Txns</span>
+              <span className="info-value">
+                {stats?.hlf_stats?.total_submitted || 0} submitted &nbsp;·&nbsp;
+                {stats?.hlf_stats?.successful || 0} ok &nbsp;·&nbsp;
+                {stats?.hlf_queue_size || 0} pending
+              </span>
             </div>
           </div>
         </div>

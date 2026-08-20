@@ -97,55 +97,87 @@ class HyperledgerFabricClient:
     
     def _invoke_chaincode(self, data: Dict) -> bool:
         """
-        Invoke chaincode to store verdict.
-        
-        Args:
-            data: Verdict data
-            
-        Returns:
-            True if successful, False otherwise
+        Invoke chaincode via peer CLI.
+        - On Linux/WSL: calls peer binary directly.
+        - On Windows: bridges through wsl.exe into Ubuntu-22.04.
         """
+        import platform
+
         try:
-            # Build peer chaincode invoke command
-            cmd = [
-                "peer", "chaincode", "invoke",
-                "-o", "localhost:7050",
-                "--ordererTLSHostnameOverride", "orderer.example.com",
-                "--tls",
-                "--cafile", f"{self.network_path}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem",
-                "-C", self.channel,
-                "-n", self.chaincode,
-                "--peerAddresses", "localhost:7051",
-                "--tlsRootCertFiles", f"{self.network_path}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt",
-                "--peerAddresses", "localhost:9051",
-                "--tlsRootCertFiles", f"{self.network_path}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt",
-                "-c", json.dumps({
-                    "function": "storeVerdict",
-                    "Args": [
-                        str(data.get("device_id", "UNKNOWN")),
-                        str(data.get("uid", "UNKNOWN")),
-                        str(data.get("firmware", "UNKNOWN")),
-                        str(data.get("verdict", "UNKNOWN")),
-                        str(data.get("temperature", 0)),
-                        str(data.get("humidity", 0)),
-                        str(data.get("interval", 0)),
-                        str(data.get("timestamp", int(time.time())))
-                    ]
+            # Linux paths (inside WSL or native Linux)
+            nw = self.network_path
+            peer_bin = "/home/samuel/fabric-iot-ids/fabric-samples/bin/peer"
+            fabric_cfg = "/home/samuel/fabric-iot-ids/fabric-samples/config"
+            cafile = f"{nw}/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem"
+            tls1   = f"{nw}/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt"
+            tls2   = f"{nw}/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt"
+            msp    = f"{nw}/organizations/peerOrganizations/org1.example.com/users/Admin@org1.example.com/msp"
+
+            payload = json.dumps({
+                "function": "storeVerdict",
+                "Args": [
+                    str(data.get("device_id", "UNKNOWN")),
+                    str(data.get("uid", "UNKNOWN")),
+                    str(data.get("firmware", "UNKNOWN")),
+                    str(data.get("verdict", "UNKNOWN")),
+                    str(data.get("temperature", 0)),
+                    str(data.get("humidity", 0)),
+                    str(data.get("interval", 0)),
+                    str(data.get("timestamp", int(time.time())))
+                ]
+            })
+
+            if platform.system() == "Windows":
+                # Running on Windows — bridge through wsl.exe
+                bash_cmd = (
+                    f"export FABRIC_CFG_PATH={fabric_cfg} && "
+                    f"export CORE_PEER_TLS_ENABLED=true && "
+                    f"export CORE_PEER_LOCALMSPID=Org1MSP && "
+                    f"export CORE_PEER_TLS_ROOTCERT_FILE={tls1} && "
+                    f"export CORE_PEER_MSPCONFIGPATH={msp} && "
+                    f"export CORE_PEER_ADDRESS=localhost:7051 && "
+                    f"{peer_bin} chaincode invoke "
+                    f"-o localhost:7050 "
+                    f"--ordererTLSHostnameOverride orderer.example.com "
+                    f"--tls --cafile {cafile} "
+                    f"-C {self.channel} -n {self.chaincode} "
+                    f"--peerAddresses localhost:7051 --tlsRootCertFiles {tls1} "
+                    f"--peerAddresses localhost:9051 --tlsRootCertFiles {tls2} "
+                    f"-c '{payload}'"
+                )
+                cmd = ["wsl", "-d", "Ubuntu-22.04", "--", "bash", "-c", bash_cmd]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            else:
+                # Running on Linux/WSL — call peer directly
+                env = os.environ.copy()
+                env.update({
+                    "FABRIC_CFG_PATH": fabric_cfg,
+                    "CORE_PEER_TLS_ENABLED": "true",
+                    "CORE_PEER_LOCALMSPID": "Org1MSP",
+                    "CORE_PEER_TLS_ROOTCERT_FILE": tls1,
+                    "CORE_PEER_MSPCONFIGPATH": msp,
+                    "CORE_PEER_ADDRESS": "localhost:7051",
                 })
-            ]
-            
-            # Execute command
-            result = subprocess.run(
-                cmd,
-                cwd=self.network_path,
-                env=self.env,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            return result.returncode == 0
-            
+                cmd = [
+                    peer_bin, "chaincode", "invoke",
+                    "-o", "localhost:7050",
+                    "--ordererTLSHostnameOverride", "orderer.example.com",
+                    "--tls", "--cafile", cafile,
+                    "-C", self.channel, "-n", self.chaincode,
+                    "--peerAddresses", "localhost:7051", "--tlsRootCertFiles", tls1,
+                    "--peerAddresses", "localhost:9051", "--tlsRootCertFiles", tls2,
+                    "-c", payload
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
+
+            if result.returncode == 0:
+                return True
+            else:
+                print(f"HLF invoke failed (rc={result.returncode})")
+                print(f"  stderr: {result.stderr[-400:]}")
+                print(f"  stdout: {result.stdout[-200:]}")
+                return False
+
         except Exception as e:
             print(f"Chaincode invoke error: {e}")
             return False

@@ -59,8 +59,9 @@ SCALER_PATH = f"{MODEL_DIR}/scaler_v4.pkl"
 XGBOOST_PATH = f"{MODEL_DIR}/xgboost_binary_v4.pkl"
 METADATA_PATH = f"{MODEL_DIR}/metadata_v4.pkl"
 
-TRAINING_MODE = True   # Set to False for demo
-HLF_ENABLED   = False  # Set to True only when Hyperledger Fabric is installed (requires Linux/WSL2)
+TRAINING_MODE = False  # Demo mode — quarantine active, full enforcement
+HLF_ENABLED   = True   # WSL2 peer CLI bridge — requires network running in Ubuntu-22.04
+HLF_NETWORK_PATH = "/home/samuel/fabric-iot-ids/fabric-samples/test-network"
 
 # QUARANTINE Configuration
 QUARANTINE_THRESHOLD = 3  # Block after 3 violations
@@ -83,11 +84,13 @@ feature_names = None
 device_history = defaultdict(lambda: deque(maxlen=10))  # Last 10 packets per device
 violation_counts = defaultdict(int)  # Track violations per UID
 quarantine_list = {}  # {uid: expiry_timestamp}
+verdict_breakdown = defaultdict(int)  # Track verdict type counts
+hlf_total_queued = 0  # Cumulative HLF submissions
 
 # Logging systems
 merkle_logger = MerkleTreeLogger()
 hlf_client = HyperledgerFabricClient(
-    network_path="~/fabric-iot-ids/fabric-samples/test-network"
+    network_path=HLF_NETWORK_PATH
 )
 
 # ============================================================
@@ -347,6 +350,10 @@ def process_telemetry(packet: TelemetryPacket):
     
     if final_verdict != "TRUSTED":
         violation_counts[uid] += 1
+        # Track breakdown by base verdict type
+        for vtype in ["TAMPER", "ANOMALY", "CLONE", "ML_FLAGGED"]:
+            if vtype in final_verdict:
+                verdict_breakdown[vtype] += 1
         print(f"⚠️  Violation #{violation_counts[uid]} for {uid}: {final_verdict}")
         
         if not TRAINING_MODE:  # Only quarantine in production mode
@@ -390,8 +397,9 @@ def process_telemetry(packet: TelemetryPacket):
     
     # Layer 3: Blockchain (async audit trail)
     if HLF_ENABLED:
+        global hlf_total_queued
         hlf_client.submit_verdict({
-            "deviceId": packet.device_id,
+            "device_id": packet.device_id,
             "uid": uid,
             "firmware": packet.firmware_hash,
             "verdict": final_verdict,
@@ -400,6 +408,7 @@ def process_telemetry(packet: TelemetryPacket):
             "interval": packet.interval,
             "timestamp": packet.timestamp
         })
+        hlf_total_queued += 1
         print(f"📝 Queued for HLF: {uid}")
 
 # ============================================================
@@ -407,49 +416,30 @@ def process_telemetry(packet: TelemetryPacket):
 # ============================================================
 
 def extract_features(packet: TelemetryPacket, uid: str):
-    """Extract 11 features for ML model"""
-    
+    """Extract 5 features for v4 ML model:
+    humidity, interval, temperature, interval_deviation, interval_mean
+    Must match feature order in metadata_v4.pkl exactly.
+    """
+
     history = list(device_history[uid])
-    
+
     if len(history) < 2:
-        return None  # Need at least 2 packets for window features
-    
-    # Base features
-    humidity = packet.humidity
-    interval = packet.interval
-    temperature = packet.temperature
-    uid_flag = 0 if uid == LEGIT_UID else 1
-    firmware_flag = 0 if packet.firmware_hash == LEGIT_FIRMWARE else 1
-    
-    # Engineered features
-    interval_deviation = abs(interval - 5000)
-    temp_out_of_range = 1 if (temperature < 25 or temperature > 35) else 0
-    humid_out_of_range = 1 if (humidity < 30 or humidity > 65) else 0
-    
-    # Sliding window features (mean only, no std/min/max to avoid leakage)
+        return None  # Need at least 2 packets for interval_mean
+
+    interval_deviation = abs(packet.interval - 5000)
+
     intervals = [h['interval'] for h in history]
-    temps = [h['temperature'] for h in history]
-    humids = [h['humidity'] for h in history]
-    
     interval_mean = np.mean(intervals)
-    temp_mean = np.mean(temps)
-    humid_mean = np.mean(humids)
-    
-    # Return features in exact order expected by model
+
+    # Exact order as trained — see metadata_v4.pkl feature_names
     features = [
-        humidity,
-        interval,
-        temperature,
-        uid_flag,
-        firmware_flag,
+        packet.humidity,
+        packet.interval,
+        packet.temperature,
         interval_deviation,
-        temp_out_of_range,
-        humid_out_of_range,
         interval_mean,
-        temp_mean,
-        humid_mean
     ]
-    
+
     return features
 
 # ============================================================
@@ -469,6 +459,7 @@ async def stats():
     """System statistics"""
     
     merkle_stats = merkle_logger.get_statistics(log_entries)
+    hlf_stats = hlf_client.get_stats() if HLF_ENABLED else {}
     
     return {
         "devices_tracked": len(device_history),
@@ -479,7 +470,13 @@ async def stats():
             "chain_valid": merkle_stats['chain_valid'],
             "merkle_root": merkle_stats['merkle_root']
         },
-        "hlf_queue_size": hlf_client.queue.qsize() if HLF_ENABLED else 0
+        "hlf_queue_size": hlf_client.queue.qsize() if HLF_ENABLED else 0,
+        "hlf_stats": {
+            "total_submitted": hlf_total_queued,
+            "successful": hlf_stats.get("successful", 0),
+            "failed": hlf_stats.get("failed", 0),
+        },
+        "verdict_breakdown": dict(verdict_breakdown),
     }
 
 @app.get("/verify-logs")

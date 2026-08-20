@@ -25,6 +25,9 @@ ENV/
 # Data files
 *.csv
 data/
+*.png
+*.jpg
+*.jpeg
 
 # IDE
 .vscode/
@@ -32,6 +35,7 @@ data/
 *.swp
 *.swo
 *~
+debug_hlf.sh
 
 # OS
 .DS_Store

@@ -12,11 +12,11 @@
 // ============================================================
 
 // ---------------- WIFI CONFIG ----------------
-const char* ssid = "D-Link";
-const char* password = "tk98ze11";
+const char* ssid = "shashank";
+const char* password = "shashank123";
 
 // ---------------- MQTT CONFIG ----------------
-const char* mqtt_server = "192.168.0.109";
+const char* mqtt_server = "10.78.118.169";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
